@@ -23,11 +23,16 @@ type ChainConfig struct {
 	Max_Commit              int // 确认多少个交易后就迁移
 	Max_Commit_Block        int // 确认多少个区块后就迁移，要×分片数量
 	ClientSendTX            bool
-	Stop_When_Migrating     bool //  迁移时是停止还是继续运行
-	Lock_Acc_When_Migrating bool //迁移时相关账户是否要锁住
-	//
-	Not_Lock_Acc_When_Migrating bool //多版本并发
-	//
+
+	// --- 迁移策略（维度一）：改 MigrationStrategy 后须调用 ApplyMigrationStrategy ---
+	MigrationStrategy MigrationStrategy
+
+	// 以下三字段由 ApplyMigrationStrategy 根据 MigrationStrategy 写入，业务代码仍读它们（过渡期）。
+	Stop_When_Migrating         bool
+	Lock_Acc_When_Migrating     bool
+	Not_Lock_Acc_When_Migrating bool
+
+	// --- 扩展实验场景（策略对比时应全部为 false）---
 	Bu_Tong_Bi_Li            bool //进行相关交易不同占比的实验, 地址：489338d5e8d42e8c923d1f47361d979503d4ad68
 	Bu_Tong_Bi_Li_2          bool //进行相关交易不同占比的实验, 地址有10个
 	Bu_Tong_Shi_Jian         bool //进行迁移请求不同时间被打包的实验, 地址：489338d5e8d42e8c923d1f47361d979503d4ad68
@@ -408,11 +413,7 @@ var (
 		Max_Commit:              50000,
 		Max_Commit_Block:        20,
 		ClientSendTX:            true,
-		Stop_When_Migrating:     false,
-		Lock_Acc_When_Migrating: false,
-		//
-		Not_Lock_Acc_When_Migrating: true,
-		//
+		MigrationStrategy:       StrategyMVSS,
 		Bu_Tong_Bi_Li:            false,
 		Bu_Tong_Bi_Li_2:          true,
 		Bu_Tong_Shi_Jian:         false,

@@ -2,6 +2,8 @@
 
 基于 **Go** 的分片区块链仿真器，实现 **MVSS（多版本状态同步）** 相关的跨分片交易、账户迁移与中继（relay）逻辑。适用于论文复现与性能实验，默认采用简化的单节点 PBFT 出块模型。
 
+![全流程](D:\Desktop\实验室\MVSS+\MVSS-main\说明文档\全流程.png)
+
 ## 环境要求
 
 - Go **1.20+**
@@ -14,8 +16,9 @@
 
 ```bat
 start_2shard_2node.bat
-REM 或指定数据集：
-start_2shard_2node.bat selectedTxs_300K.csv
+REM 或指定数据集与迁移策略（MVSS=现有逻辑，MVSS+=新方法接口）：
+start_2shard_2node.bat selectedTxs_300K.csv MVSS
+start_2shard_2node.bat selectedTxs_300K.csv MVSS+
 ```
 
 脚本会依次启动 **S0-N0、S0-N1、S1-N0、S1-N1** 四个节点窗口，等待数秒后启动 **客户端**（监听 `127.0.0.1:8800`）。节点默认监听 `8010/8011/8020/8021`。

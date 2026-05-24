@@ -21,7 +21,8 @@ var (
 	nodeID         string
 	testFile       string
 	isClient       bool
-	maxInjectTxs   int // 0 = unlimited; client only: cap loaded/injected txs for smoke tests
+	maxInjectTxs       int // 0 = unlimited; client only: cap loaded/injected txs for smoke tests
+	migrationStrategy  string
 	// requestlog    *csv.Writer
 	EndTime int64
 )
@@ -34,8 +35,18 @@ func Test_shard() {
 	flag.StringVarP(&testFile, "testFile", "t", "", "path of the input test file")
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
 	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
+	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration method: MVSS|MVSS+|lock|finetuned|stop_epoch (empty=config default)")
 
 	flag.Parse() //解析命令行参数
+
+	applyMigrationConfig := func(cfg *params.ChainConfig) {
+		if migrationStrategy != "" {
+			cfg.MigrationStrategy = params.ParseMigrationStrategy(migrationStrategy)
+		}
+		params.ApplyMigrationStrategy(cfg)
+		fmt.Printf("MigrationStrategy=%s (Stop=%v Lock=%v NotLock=%v)\n",
+			cfg.MigrationStrategy, cfg.Stop_When_Migrating, cfg.Lock_Acc_When_Migrating, cfg.Not_Lock_Acc_When_Migrating)
+	}
 
 	if isClient {
 		if testFile == "" {
@@ -50,6 +61,7 @@ func Test_shard() {
 		if maxInjectTxs > 0 {
 			config.MaxInjectTxs = maxInjectTxs
 		}
+		applyMigrationConfig(config)
 		pbft.RunClient(testFile)
 		return
 	}
@@ -69,6 +81,7 @@ func Test_shard() {
 	config.Malicious_num = int(malicious_num)
 	config.Shard_num = int(shard_num)
 	config.Path = testFile
+	applyMigrationConfig(config)
 	// for i := 0; i < 184379; i++ {
 	// 	params.Init_addrs = append(params.Init_addrs, utils.Int2hexString(i))
 	// }
