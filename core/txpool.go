@@ -191,7 +191,30 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 		account.Account2ShardLock.Unlock()
 
 		//如果是锁机制，所有涉及到的交易都会被锁住。即便被锁的是收钱的账户，也不会先执行扣钱部分
-		if config.Not_Lock_Acc_When_Migrating {
+		// MVSS+：老交易继续打包，新交易重定向，暂停被 FSM 挂起的老交易
+		if params.IsMVSSPlus() && config.Not_Lock_Acc_When_Migrating {
+			account.Not_Lock_Acc_Lock.Lock()
+			if account.Not_Lock_Acc[from] {
+				if account.IsTXNew(v.TXmig1_Time, v.RequestTime) {
+					account.Not_Lock_Acc_Lock.Unlock()
+					continue
+				}
+				if ctx, ok := account.GetMigCtx(from); ok && ctx.IsPaused(v.Id) {
+					account.Not_Lock_Acc_Lock.Unlock()
+					continue
+				}
+			} else if account.Not_Lock_Acc[to] {
+				reqT := v.Second_RequestTime
+				if reqT <= 0 {
+					reqT = v.RequestTime
+				}
+				if account.IsTXNew(v.TXmig1_Time, reqT) {
+					account.Not_Lock_Acc_Lock.Unlock()
+					continue
+				}
+			}
+			account.Not_Lock_Acc_Lock.Unlock()
+		} else if config.Not_Lock_Acc_When_Migrating {
 			account.Not_Lock_Acc_Lock.Lock()
 			if account.Not_Lock_Acc[from] && !v.IsRelay && !v.Relay_Lock && (v.TXmig1_Time < v.RequestTime) {
 				if v.LockTime > 0 {

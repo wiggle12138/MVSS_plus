@@ -292,6 +292,9 @@ func (p *Pbft) commit1(content []byte, pbftType string) {
 				} else if len(block.TXmig1s) != 0 {
 					go p.TryTXmig1(block.TXmig1s, outbalance, st3, migTree)
 				}
+				if params.IsMVSSPlus() {
+					p.mvssTriggerSyncIfNeeded(block, st3)
+				}
 				// 通知各分片，账户已在本分片
 				if len(block.TXmig2s) != 0 {
 					go p.TryAnnounce(block.TXmig2s, st4, migTree)

@@ -230,6 +230,8 @@ func (p *Pbft) handleRequest(data []byte) {
 		go p.handleMigrateWanted()
 	case cCaP:
 		p.handleChangesAndPendings(content)
+	case cTXsync:
+		go p.handleTXsync(content)
 	case cEpochCh:
 		go p.handleEpochChange()
 	case cBalanceAndPending:
@@ -1242,6 +1244,9 @@ func (p *Pbft) handleRelay(content []byte) {
 	txcss := make([]*core.Transaction, 0) //用于存储本分片内的交易
 	for _, tx := range relay.Txs {
 		txcs := tx.Txcs
+		if params.IsMVSSPlus() && !mvssValidateIncomingTx(txcs) {
+			continue
+		}
 		target_shardID := account.Addr2Shard(hex.EncodeToString(txcs.Recipient))
 
 		account.Not_Lock_Acc_Lock.Lock()
@@ -1368,12 +1373,32 @@ func (p *Pbft) handleMig2(content []byte) {
 	}
 	fmt.Println()
 	fmt.Printf("本节点已接收到分片%v发来的迁移请求 \n", mig2.ShardID)
-	fmt.Println(mig2.TXmig2s[0].Value)
+	if len(mig2.TXmig2s) > 0 {
+		fmt.Println(mig2.TXmig2s[0].Value)
+	}
 	fmt.Println()
 
 	p.Node.CurChain.TXmig2_pool.AddTXmig2s(mig2.TXmig2s)
 
-	// if !params.Config.Cross_Chain {
+	if params.IsMVSSPlus() {
+		for _, m2 := range mig2.TXmig2s {
+			if m2.Txmig1 == nil {
+				continue
+			}
+			m1 := m2.Txmig1
+			account.SetMigCtx(m1.Address, &account.MigAccountCtx{
+				TargetShard: params.ShardTable[params.Config.ShardID],
+				Mig1Time:    m1.Request_Time,
+				LastCN:      m1.LastCN,
+				SyncNeeded:  m1.Sync,
+				MigNonce:    m1.LastCN,
+				NextNonce:   m1.LastCN,
+				OrderList:   m1.OrderList,
+				PausedTxIDs: make(map[int]bool),
+				FSM:         account.MigFSMActive,
+			})
+		}
+	}
 	// 	p.Node.CurChain.InAccout1_pool.AddIn1s(in1.Outs)
 	// }else {
 	// 	t := time.Now().Unix()
@@ -1848,22 +1873,43 @@ func (p *Pbft) handleNewMap(content []byte) {
 
 		p.mpropose(new_addr2shard)
 	} else {
-		// 找到自己要出去的
+		// 先拷贝迁出列表，避免持 Account2ShardLock 时再抢 Tx_pool.Lock（与 handleTxFromClient 死锁）
+		type migItem struct {
+			addr    string
+			toShard int
+		}
+		migTime := time.Now().UnixMilli()
+		items := make([]migItem, 0)
 		account.Account2ShardLock.Lock()
 		for _, addr := range new_addrs {
 			if account.AccountInOwnShard[addr] && new_addr2shard[addr] != params.ShardTable[params.Config.ShardID] {
-				p.Node.CurChain.TXmig1_pool.AddTXmig1(&core.TXmig1{Address: addr, FromshardID: params.ShardTable[params.Config.ShardID], ToshardID: new_addr2shard[addr], Request_Time: time.Now().UnixMilli()})
-				for _, tx := range p.Node.CurChain.Tx_pool.Queue {
-					if hex.EncodeToString(tx.Sender) == addr || hex.EncodeToString(tx.Recipient) == addr {
-						tx.TXmig1_Time = time.Now().UnixMilli()
-						//new_orderlist[tx.Id] = tx.RequestTime
-					}
-
-				}
-				//p.Node.CurChain.TXmig1_pool.AddTXmig1(&core.TXmig1{Address: addr, FromshardID: params.ShardTable[params.Config.ShardID], ToshardID: new_addr2shard[addr], Request_Time: time.Now().UnixMilli(), Orderlist: new_orderlist})
+				items = append(items, migItem{addr, new_addr2shard[addr]})
 			}
 		}
 		account.Account2ShardLock.Unlock()
+
+		for _, item := range items {
+			if params.IsMVSSPlus() {
+				m1 := p.mvssBuildMigCtx(item.addr, item.toShard, migTime)
+				p.Node.CurChain.Tx_pool.Lock.Lock()
+				for _, tx := range p.Node.CurChain.Tx_pool.Queue {
+					if hex.EncodeToString(tx.Sender) == item.addr || hex.EncodeToString(tx.Recipient) == item.addr {
+						tx.TXmig1_Time = migTime
+					}
+				}
+				p.Node.CurChain.Tx_pool.Lock.Unlock()
+				p.Node.CurChain.TXmig1_pool.AddTXmig1(m1)
+			} else {
+				p.Node.CurChain.TXmig1_pool.AddTXmig1(&core.TXmig1{Address: item.addr, FromshardID: params.ShardTable[params.Config.ShardID], ToshardID: item.toShard, Request_Time: migTime})
+				p.Node.CurChain.Tx_pool.Lock.Lock()
+				for _, tx := range p.Node.CurChain.Tx_pool.Queue {
+					if hex.EncodeToString(tx.Sender) == item.addr || hex.EncodeToString(tx.Recipient) == item.addr {
+						tx.TXmig1_Time = migTime
+					}
+				}
+				p.Node.CurChain.Tx_pool.Lock.Unlock()
+			}
+		}
 	}
 
 }

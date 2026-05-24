@@ -104,6 +104,9 @@ func (p *Pbft) handleAnns(anns []*core.TXann, st *trie.Trie, migTree *trie.Trie)
 			account.Not_Lock_Acc_Lock.Lock()
 			delete(account.Not_Lock_Acc, ann.Address)
 			account.Not_Lock_Acc_Lock.Unlock()
+			if params.IsMVSSPlus() {
+				mvssOnAnnounceDone(ann.Address)
+			}
 		} else if params.Config.Lock_Acc_When_Migrating { //如果是锁机制则将其解锁
 			account.Lock_Acc_Lock.Lock()
 			delete(account.Lock_Acc, ann.Address)

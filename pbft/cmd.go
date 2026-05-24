@@ -93,8 +93,14 @@ type ChangeAndPending struct {
 }
 
 type ChangesAndPendings struct {
-	TXnss   []*core.TXns    
+	TXnss   []*core.TXns
 	List    map[string]*ChangeAndPending
+	ShardID string
+}
+
+// SyncMsg 跨分片 TXsync 载荷。
+type SyncMsg struct {
+	TXsyncs []*core.TXsync
 	ShardID string
 }
 
@@ -159,6 +165,7 @@ const (
 	cTXmig1     command = "txmig1"
 	cAnnounce command = "announce"
 	cCaP      command = "csAps"
+	cTXsync   command = "txsync"
 
 	cStop    command = "stop"
 	cLLBlock command = "LLblock"

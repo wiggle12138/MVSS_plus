@@ -35,7 +35,7 @@ func Test_shard() {
 	flag.StringVarP(&testFile, "testFile", "t", "", "path of the input test file")
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
 	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
-	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration method: MVSS|MVSS+|lock|finetuned|stop_epoch (empty=config default)")
+	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration: original|MVSS|MVSS-Delta|lock|finetuned|stop_epoch (MVSS+ alias=MVSS; empty=config default)")
 
 	flag.Parse() //解析命令行参数
 

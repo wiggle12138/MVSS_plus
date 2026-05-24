@@ -15,8 +15,7 @@ import (
 // StateAccount is the Ethereum consensus representation of accounts.
 // These objects are stored in the main account trie.
 type AccountState struct {
-	// Nonce    uint64
-	// temporary int
+	Nonce   uint64
 	Balance *big.Int
 	// Root     []byte // merkle root of the storage trie
 	// CodeHash []byte
@@ -83,6 +82,7 @@ func InitGlobals() {
 	if Not_Lock_Acc == nil {
 		Not_Lock_Acc = make(map[string]bool)
 	}
+	InitMigCtx()
 }
 
 // 根据账户地址的出所在分片。若是旧账户

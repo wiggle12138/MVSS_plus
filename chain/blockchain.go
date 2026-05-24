@@ -417,6 +417,18 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 			account_state.Balance.Set(v.Value)
 			account_state.Migrate = -1
 			account_state.Location = params.ShardTable[bc.ChainConfig.ShardID]
+			// MVSS+：合并 TXsync 带来的待应用状态
+			if params.IsMVSSPlus() {
+				if pending, ok := account.TakeMigPendingState(v.Address); ok {
+					account_state.Nonce = pending.Nonce
+					if pending.Balance != nil {
+						account_state.Balance.Set(pending.Balance)
+					}
+				}
+				if v.Txmig1 != nil {
+					account_state.Nonce = v.Txmig1.LastCN
+				}
+			}
 			st.Update(hex_address, account_state.Encode())
 		}
 	}
@@ -440,6 +452,13 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 				log.Panic()
 			}
 			account_state := account.DecodeAccountState(s_state_enc)
+			// MVSS+：nonce 校验防双花，通过后递增
+			if params.IsMVSSPlus() {
+				if tx.Nonce != account_state.Nonce {
+					continue
+				}
+				account_state.Nonce++
+			}
 			account_state.Balance.Sub(account_state.Balance, tx.Value)
 			st.Update(tx.Sender, account_state.Encode())
 		}
@@ -680,6 +699,7 @@ func (bc *BlockChain) genesisStateTree(stateroot []byte) []byte {
 			log.Panic()
 		}
 		accountState := &account.AccountState{
+			Nonce:    0,
 			Balance:  value,
 			Migrate:  -1,
 			Location: utils.Addr2Shard(address),

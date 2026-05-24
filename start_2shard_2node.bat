@@ -6,8 +6,10 @@ REM Order: start 4 shard nodes first, wait, then client (fixes Sendtime dial ref
 REM Usage:
 REM   start_2shard_2node.bat
 REM   start_2shard_2node.bat selectedTxs_300K.csv
+REM   start_2shard_2node.bat selectedTxs_300K.csv original
 REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS
-REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS+
+REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
+REM   (legacy alias: MVSS+ is accepted as MVSS)
 REM Slow cold build: set NODE_WAIT_SEC=60 before running this bat.
 
 pushd "%~dp0"

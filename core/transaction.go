@@ -35,6 +35,8 @@ type Transaction struct {
 	Rec_Suppose_on_chain int
 	Sen_Suppose_on_chain int
 	Relay_Lock           bool
+	Nonce                uint64
+	RedirectTag          []byte // MVSS+ 迁移期新交易重定向标签
 }
 
 func (tx *Transaction) PrintTx() {

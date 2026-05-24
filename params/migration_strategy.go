@@ -10,23 +10,29 @@ import (
 type MigrationStrategy string
 
 const (
-	// StrategyMVSSPlus 新方法 MVSS+（分流 + TX_sync 等，逐步实现；接口入口）。
-	StrategyMVSSPlus MigrationStrategy = "MVSS+"
-	// StrategyMVSS 论文 MVSS 对齐目标；当前尚未完整实现，暂走现有工程逻辑（Not_Lock + CaP）。
+	// StrategyOriginal 原工程近似路径（Not_Lock + CaP，未完整实现论文 MVSS）。
+	StrategyOriginal MigrationStrategy = "original"
+	// StrategyMVSS 论文 MVSS 实现（分流 + TX_sync + nonce/RedirectTag 等，Phase1 主线）。
 	StrategyMVSS MigrationStrategy = "MVSS"
+	// StrategyMVSSDelta 论文 MVSS-Delta（在 MVSS 基础上启用增量同步，Phase2）。
+	StrategyMVSSDelta MigrationStrategy = "MVSS-Delta"
 	StrategyLock         MigrationStrategy = "lock"
 	StrategyFinetuned    MigrationStrategy = "finetuned"
 	StrategyStopEpoch    MigrationStrategy = "stop_epoch"
 )
 
 // ParseMigrationStrategy 解析命令行或配置中的策略名；非法值 panic。
-// 接受 MVSS、MVSS+，以及别名 mvss、mvss_plus（便于 shell 转义）。
 func ParseMigrationStrategy(s string) MigrationStrategy {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "original":
+		return StrategyOriginal
 	case "mvss":
 		return StrategyMVSS
+	// 过渡期别名：旧脚本中的 MVSS+ 即现 StrategyMVSS
 	case "mvss+", "mvss_plus", "mvssplus":
-		return StrategyMVSSPlus
+		return StrategyMVSS
+	case "mvss-delta", "mvss_delta", "mvssdelta":
+		return StrategyMVSSDelta
 	case "lock":
 		return StrategyLock
 	case "finetuned":
@@ -34,12 +40,14 @@ func ParseMigrationStrategy(s string) MigrationStrategy {
 	case "stop_epoch":
 		return StrategyStopEpoch
 	default:
-		// 保留大小写敏感字面量 MVSS / MVSS+
 		switch MigrationStrategy(strings.TrimSpace(s)) {
-		case StrategyMVSS, StrategyMVSSPlus, StrategyLock, StrategyFinetuned, StrategyStopEpoch:
+		case StrategyOriginal, StrategyMVSS, StrategyMVSSDelta,
+			StrategyLock, StrategyFinetuned, StrategyStopEpoch:
 			return MigrationStrategy(strings.TrimSpace(s))
 		}
-		log.Panic(fmt.Sprintf("未知 MigrationStrategy: %q，可选: MVSS, MVSS+, lock, finetuned, stop_epoch", s))
+		log.Panic(fmt.Sprintf(
+			"未知 MigrationStrategy: %q，可选: original, MVSS, MVSS-Delta, lock, finetuned, stop_epoch",
+			s))
 	}
 	return ""
 }
@@ -50,12 +58,14 @@ func ApplyMigrationStrategy(cfg *ChainConfig) {
 		return
 	}
 	if cfg.MigrationStrategy == "" {
-		cfg.MigrationStrategy = StrategyMVSS
+		cfg.MigrationStrategy = StrategyOriginal
 	}
 	switch cfg.MigrationStrategy {
-	case StrategyMVSSPlus, StrategyMVSS:
-		// MVSS+：后续在此策略下启用新逻辑；当前与 MVSS 相同 bool，便于先跑通联调。
-		// MVSS：论文对齐接口，暂用现有 Not_Lock 工程路径。
+	case StrategyMVSS, StrategyMVSSDelta:
+		cfg.Stop_When_Migrating = false
+		cfg.Lock_Acc_When_Migrating = false
+		cfg.Not_Lock_Acc_When_Migrating = true
+	case StrategyOriginal:
 		cfg.Stop_When_Migrating = false
 		cfg.Lock_Acc_When_Migrating = false
 		cfg.Not_Lock_Acc_When_Migrating = true
@@ -74,6 +84,29 @@ func ApplyMigrationStrategy(cfg *ChainConfig) {
 	default:
 		log.Panic(fmt.Sprintf("未知 MigrationStrategy: %q", cfg.MigrationStrategy))
 	}
+}
+
+// IsMVSS 是否为论文 MVSS 协议分支（含 MVSS-Delta，Delta 在其上扩展 sync）。
+func IsMVSS() bool {
+	if Config == nil {
+		return false
+	}
+	switch Config.MigrationStrategy {
+	case StrategyMVSS, StrategyMVSSDelta:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsMVSSDelta 是否为 MVSS-Delta 策略（Phase2 增量同步入口）。
+func IsMVSSDelta() bool {
+	return Config != nil && Config.MigrationStrategy == StrategyMVSSDelta
+}
+
+// IsMVSSPlus 过渡期别名，等同 IsMVSS。
+func IsMVSSPlus() bool {
+	return IsMVSS()
 }
 
 func init() {

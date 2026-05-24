@@ -413,7 +413,7 @@ var (
 		Max_Commit:              50000,
 		Max_Commit_Block:        20,
 		ClientSendTX:            true,
-		MigrationStrategy:       StrategyMVSS,
+		MigrationStrategy:       StrategyOriginal,
 		Bu_Tong_Bi_Li:            false,
 		Bu_Tong_Bi_Li_2:          true,
 		Bu_Tong_Shi_Jian:         false,

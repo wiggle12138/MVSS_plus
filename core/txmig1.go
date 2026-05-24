@@ -14,7 +14,9 @@ type TXmig1 struct {
 	Request_Time int64
 	CommitTime   int64
 	ID           int
-	//Orderlist    map[int]int64
+	Sync         bool             // 是否需要 Stage 3 状态同步
+	OrderList    map[int]int64    // txId -> RequestTime 排序表
+	LastCN       uint64           // 迁移开始时已提交的最高 nonce
 }
 
 // Encode transaction for storing
