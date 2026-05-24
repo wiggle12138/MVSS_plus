@@ -22,6 +22,12 @@ import (
 
 // 一个分片一个节点，没有pbft，固定时间出块
 func (p *Pbft) propose1() {
+	p.Node.CurChain.Tx_pool.Lock.Lock()
+	qLen := len(p.Node.CurChain.Tx_pool.Queue)
+	p.Node.CurChain.Tx_pool.Lock.Unlock()
+	fmt.Printf("[propose1] %s %s seq=%d Tx_pool.Queue_len=%d\n",
+		params.Config.ShardID, p.Node.nodeID, p.sequenceID, qLen)
+
 	pbftType := "Block"
 	block := p.Node.CurChain.GenerateBlock(p.sequenceID)
 	encoded_block := block.Encode()
@@ -329,6 +335,7 @@ func (p *Pbft) commit1(content []byte, pbftType string) {
 				Txs:              commit_txs,
 				BlockSize:        len(block.TXmig1s) + len(block.TXmig2s) + len(block.Anns) + len(block.NSs) + len(block.Transactions),
 				Num_of_New_State: len(block.NSs),
+				ShardID:          params.Config.ShardID,
 			}
 			//主节点向客户端发送已确认上链的交易集
 			c, err := json.Marshal(commitTX_numofNS)
@@ -336,7 +343,7 @@ func (p *Pbft) commit1(content []byte, pbftType string) {
 				log.Panic(err)
 			}
 			m := jointMessage(cReply, c)
-			utils.TcpDial(m, params.ClientAddr)
+			go utils.TcpDial(m, params.ClientAddr) // 勿阻塞 commit，避免占满 sequenceLock 导致 Propose 卡住
 
 			if p.sequenceID == 1 && (params.Config.Bu_Tong_Bi_Li || params.Config.Bu_Tong_Shi_Jian || (params.Config.Fail && !params.Config.Bu_Tong_Bi_Li_2) || params.Config.Cross_Chain) {
 				t := time.Now().UnixMilli()

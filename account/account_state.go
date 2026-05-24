@@ -58,9 +58,42 @@ var Not_Lock_Acc_Lock sync.Mutex
 
 var Not_Lock_Acc map[string]bool
 
+// InitGlobals 初始化账户迁移相关的全局 map（进程内只需调用一次）。
+func InitGlobals() {
+	Account2ShardLock.Lock()
+	defer Account2ShardLock.Unlock()
+	if Account2Shard == nil {
+		Account2Shard = make(map[string]int)
+	}
+	if AccountInOwnShard == nil {
+		AccountInOwnShard = make(map[string]bool)
+	}
+	if BalanceBeforeOut == nil {
+		BalanceBeforeOut = make(map[string]*big.Int)
+	}
+	if Outing_Acc_Before_Announce == nil {
+		Outing_Acc_Before_Announce = make(map[string]bool)
+	}
+	if Outing_Acc_After_Announce == nil {
+		Outing_Acc_After_Announce = make(map[string]bool)
+	}
+	if Lock_Acc == nil {
+		Lock_Acc = make(map[string]bool)
+	}
+	if Not_Lock_Acc == nil {
+		Not_Lock_Acc = make(map[string]bool)
+	}
+}
+
 // 根据账户地址的出所在分片。若是旧账户
 func Addr2Shard(senderAddr string) int {
 	Account2ShardLock.Lock()
+	if Account2Shard == nil {
+		Account2Shard = make(map[string]int)
+	}
+	if AccountInOwnShard == nil {
+		AccountInOwnShard = make(map[string]bool)
+	}
 	if shardID, ok := Account2Shard[senderAddr]; ok {
 		Account2ShardLock.Unlock()
 		return shardID

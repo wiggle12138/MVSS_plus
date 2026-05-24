@@ -84,7 +84,11 @@ func (p *Pbft) handleConn(conn net.Conn) {
 
 		// 读取消息长度前缀
 		if _, err := conn.Read(lengthPrefix); err != nil {
-			log.Fatal("Error reading message length prefix:", err.Error())
+			if err == io.EOF {
+				return
+			}
+			log.Printf("Error reading message length prefix: %v", err)
+			return
 		}
 
 		// 将消息长度前缀解析为一个无符号整数
@@ -94,13 +98,12 @@ func (p *Pbft) handleConn(conn net.Conn) {
 		message := make([]byte, length)
 
 		// 读取消息内容
-		if n, err := io.ReadFull(conn, message); err != nil {
-			if err == io.ErrUnexpectedEOF {
-				log.Fatal("Error reading message:", err.Error(), n)
-			}else {
-				log.Fatal("Error reading message:", err.Error())
+		if _, err := io.ReadFull(conn, message); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return
 			}
-			
+			log.Printf("Error reading message: %v", err)
+			return
 		}
 
 		p.handleRequest(message)

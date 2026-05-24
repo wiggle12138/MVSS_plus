@@ -14,13 +14,14 @@ import (
 )
 
 var (
-	node          *shard.ShardNode
-	shard_num     int
-	shardID       string
-	malicious_num int
-	nodeID        string
-	testFile      string
-	isClient      bool
+	node           *shard.ShardNode
+	shard_num      int
+	shardID        string
+	malicious_num  int
+	nodeID         string
+	testFile       string
+	isClient       bool
+	maxInjectTxs   int // 0 = unlimited; client only: cap loaded/injected txs for smoke tests
 	// requestlog    *csv.Writer
 	EndTime int64
 )
@@ -32,6 +33,7 @@ func Test_shard() {
 	flag.StringVarP(&nodeID, "nodeID", "n", "", "id of this node, for example, N0")
 	flag.StringVarP(&testFile, "testFile", "t", "", "path of the input test file")
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
+	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
 
 	flag.Parse() //解析命令行参数
 
@@ -45,6 +47,9 @@ func Test_shard() {
 		config.ShardID = shardID
 		config.Malicious_num = int(malicious_num)
 		config.Shard_num = int(shard_num)
+		if maxInjectTxs > 0 {
+			config.MaxInjectTxs = maxInjectTxs
+		}
 		pbft.RunClient(testFile)
 		return
 	}
@@ -54,6 +59,8 @@ func Test_shard() {
 	if shardID == "" || nodeID == "" || testFile == "" {
 		log.Panic("参数不正确！")
 	}
+
+	//下面是分片节点的逻辑
 
 	// 修改全局变量 Config，之后其他地方会调用
 	config := params.Config
@@ -90,12 +97,37 @@ func Test_shard() {
 		if err == io.EOF {
 			break
 		}
-		senderstr, recipientstr := row[1][2:], row[2][2:]
-		if path == "0to999999_BlockTransaction.csv" || path == "300W.csv" || path == "100W.csv" || path == "20W.csv" || path == "50W.csv" || path == "200W.csv" {
+		var senderstr, recipientstr string
+		if config.Path == "0to999999_BlockTransaction.csv" || config.Path == "300W.csv" || config.Path == "100W.csv" || config.Path == "20W.csv" || config.Path == "50W.csv" || config.Path == "200W.csv" {
+			// 特殊数据集格式：地址在第 4/5 列（索引 3/4）
+			if len(row) < 8 {
+				continue
+			}
+			if len(row[3]) < 2 || len(row[4]) < 2 {
+				continue
+			}
 			if row[5] != "None" || row[6] == "1" || row[7] == "1" || len(row[4][2:]) != 40 || len(row[3][2:]) != 40 || row[4] == row[3] {
 				continue
 			}
 			senderstr, recipientstr = row[3][2:], row[4][2:]
+		} else if config.Path == "selectedTxs_300K.csv" {
+			// 与 pbft/client.go Get_Initial_Map_And_TXS 中 dataset_flag==2 一致：地址在列 3/4，金额在列 8
+			if len(row) < 9 {
+				continue
+			}
+			if len(row[3]) < 2 || len(row[4]) < 2 {
+				continue
+			}
+			senderstr, recipientstr = row[3][2:], row[4][2:]
+		} else {
+			// 普通数据集格式：地址在第 2/3 列（索引 1/2）
+			if len(row) < 3 {
+				continue
+			}
+			if len(row[1]) < 2 || len(row[2]) < 2 {
+				continue
+			}
+			senderstr, recipientstr = row[1][2:], row[2][2:]
 		}
 
 		if !isExist[senderstr] {
@@ -119,6 +151,8 @@ func Test_shard() {
 	// 	// requestlog.Write([]string{"txid", "waiting_time", "is_ctx", "1st_queueing_time", "2nd_queueing_time"})
 	// 	// requestlog.Flush()
 	// }
+
+	//NewShardNode创建分片节点
 
 	if _, ok := params.NodeTable[shardID][nodeID]; ok {
 		node = shard.NewShardNode()

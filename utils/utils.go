@@ -100,8 +100,11 @@ func TcpDial(context []byte, addr string) {
 	// 发送消息
 	_, err := conn.Write(data)
 	if err != nil {
-		log.Fatal(err)
-
+		log.Printf("TcpDial write to %s failed: %v", addr, err)
+		connMaplock.Lock()
+		delete(connMap, addr)
+		connMaplock.Unlock()
+		_ = conn.Close()
 	}
 
 }

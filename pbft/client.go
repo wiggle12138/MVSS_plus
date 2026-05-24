@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,9 +46,14 @@ var (
 	zero_count                            int
 	zero_count_lock                       sync.Mutex
 	onlyOnce_lock                         sync.Mutex
+	// injectDone==1 表示 InjectTXS 已全部发完；此前不因「空块」计数触发停止，避免启动/注入阶段的空块风暴。
+	injectDone uint32
+	// 按分片统计连续空块回复；仅当 injectDone 后且每个活跃分片 streak 均 >=5 时停止（避免某分片长期无交易误停全局）。
+	emptyStreakByShard map[string]int
 )
 
 func RunClient(path string) {
+	// 客户端节点
 	// txs := LoadTxsWithShard(path)
 	// tx_cnt := CountTx(path)
 	// finished := make([]bool, tx_cnt)
@@ -60,9 +66,18 @@ func RunClient(path string) {
 	num_of_unfinished_migrated_TXs = 0
 	num_of_shard_not_sending_pending = params.Config.Shard_num
 	zero_count = 0
+	atomic.StoreUint32(&injectDone, 0)
+	zero_count_lock.Lock()
+	emptyStreakByShard = make(map[string]int)
+	for _, id := range params.ActiveShardIDs() {
+		emptyStreakByShard[id] = 0
+	}
+	zero_count_lock.Unlock()
 
-	account.Account2Shard = make(map[string]int)
+	account.InitGlobals()
 	go listener()
+	// Brief yield so the client listener binds before shard nodes may dial 127.0.0.1:8800.
+	time.Sleep(300 * time.Millisecond)
 
 	// 确保log目录存在
 	if _, err := os.Stat("./log"); os.IsNotExist(err) {
@@ -84,6 +99,10 @@ func RunClient(path string) {
 	txs := []*core.Transaction{}
 	if params.Config.ClientSendTX {
 		txs = Get_Initial_Map_And_TXS(path, account.Account2Shard)
+		if params.Config.MaxInjectTxs > 0 && len(txs) > params.Config.MaxInjectTxs {
+			txs = txs[:params.Config.MaxInjectTxs]
+			fmt.Printf("[RunClient] MaxInjectTxs=%d，已截断为前 %d 笔交易\n", params.Config.MaxInjectTxs, len(txs))
+		}
 		new_addr2shard := map[string]int{}
 		new_addrs := []string{}
 		algorithmbegin := time.Now().UnixMilli()
@@ -217,6 +236,9 @@ func RunClient(path string) {
 
 		}
 		go InjectTXS(txs)
+	} else {
+		// 无客户端注入时不会执行 InjectTXS，仍需允许按空块规则结束（否则 injectDone 永远为 0）。
+		atomic.StoreUint32(&injectDone, 1)
 	}
 
 	// go counttime(StartTime)
@@ -226,7 +248,11 @@ func RunClient(path string) {
 	// }
 
 	<-all_finish
-	for shardID, nodes := range params.NodeTable {
+	for _, shardID := range params.ActiveShardIDs() {
+		nodes := params.NodeTable[shardID]
+		if nodes == nil {
+			continue
+		}
 		for nodeID, addr := range nodes {
 			fmt.Printf("客户端向分片%v的节点%v发送终止运行消息\n", shardID, nodeID)
 			m := jointMessage(cStop, nil)
@@ -295,7 +321,11 @@ func connHandler(conn net.Conn) {
 
 		// 读取消息长度前缀
 		if _, err := conn.Read(lengthPrefix); err != nil {
-			log.Fatal("Error reading message length prefix:", err.Error())
+			if err == io.EOF {
+				return
+			}
+			log.Printf("Error reading message length prefix: %v", err)
+			return
 		}
 
 		// 将消息长度前缀解析为一个无符号整数
@@ -306,7 +336,11 @@ func connHandler(conn net.Conn) {
 
 		// 读取消息内容
 		if _, err := io.ReadFull(conn, message); err != nil {
-			log.Fatal("Error reading message:", err.Error())
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return
+			}
+			log.Printf("Error reading message: %v", err)
+			return
 		}
 
 		handle(message)
@@ -380,14 +414,47 @@ func handle(data []byte) {
 		max_commit_block_lock.Unlock()
 
 		zero_count_lock.Lock()
-		if blocksize == 0 {
-			zero_count++
-			if zero_count == 5*params.Config.Shard_num {
-				fmt.Println("收到每个分片连续5个空块，停止系统运行！")
-				all_finish <- 1
+		shard := txs_and_numofNS.ShardID
+		injDone := atomic.LoadUint32(&injectDone) == 1
+		if !injDone {
+			// 注入未完成：不因空块累计停止；非空块仍清零对应分片 streak（兼容旧节点未带 ShardID 时走下方 legacy）。
+			if shard != "" && blocksize != 0 {
+				if _, ok := emptyStreakByShard[shard]; !ok {
+					emptyStreakByShard[shard] = 0
+				}
+				emptyStreakByShard[shard] = 0
+			}
+		} else if shard == "" {
+			// 旧节点未填 ShardID：沿用全局连续空回复计数
+			if blocksize == 0 {
+				zero_count++
+				if zero_count == 5*params.Config.Shard_num {
+					fmt.Println("收到连续空块回复（旧协议无 ShardID），停止系统运行！")
+					all_finish <- 1
+				}
+			} else {
+				zero_count = 0
 			}
 		} else {
-			zero_count = 0
+			if _, ok := emptyStreakByShard[shard]; !ok {
+				emptyStreakByShard[shard] = 0
+			}
+			if blocksize == 0 {
+				emptyStreakByShard[shard]++
+			} else {
+				emptyStreakByShard[shard] = 0
+			}
+			allAtThreshold := true
+			for _, id := range params.ActiveShardIDs() {
+				if emptyStreakByShard[id] < 5 {
+					allAtThreshold = false
+					break
+				}
+			}
+			if allAtThreshold {
+				fmt.Printf("每个活跃分片已连续 5 个空块（inject 已完成），停止系统运行。emptyStreakByShard=%+v\n", emptyStreakByShard)
+				all_finish <- 1
+			}
 		}
 		zero_count_lock.Unlock()
 
@@ -396,23 +463,13 @@ func handle(data []byte) {
 		commit_tx_set_lock.Lock()
 		num_of_unfinished_migration_lock.Lock()
 		num_of_unfinished_migrated_TXs_lock.Lock()
+		if max_commit_block == 0 {
+			fmt.Printf("\n 每个分片出%d啦！ \n", params.Config.Max_Commit_Block)
+		}
 		for _, tx := range txs {
 
 			// max_commit--
 			commit_tx_set = append(commit_tx_set, tx)
-			// if max_commit == 900000 {
-			// 	fmt.Printf("\n 10W啦！ \n")
-			// }
-
-			// if max_commit == 0 {
-			// 	fmt.Printf("\n 100000啦！ \n")
-			// 	// fmt.Printf("\n 1W啦！ \n")
-			// }
-
-			if max_commit_block == 0 {
-				fmt.Printf("\n 每个分片出%d啦！ \n", params.Config.Max_Commit_Block)
-				// fmt.Printf("\n 1W啦！ \n")
-			}
 
 			onlyOnce_lock.Lock()
 			// if params.Config.PorC != "MONOXIDE" && params.Config.OnlyOnce > 0 && max_commit <= 0 && num_of_unfinished_migration == 0 && num_of_unfinished_migrated_TXs == 0 {
@@ -452,23 +509,62 @@ func handle(data []byte) {
 			log.Panic(err)
 		}
 
+		var tx_set []*core.Transaction
 		pending_tx_set_lock.Lock()
 		num_of_shard_not_sending_pending_lock.Lock()
-		// max_commit_lock.Lock()
-		commit_tx_set_lock.Lock()
-		num_of_unfinished_migration_lock.Lock()
-		num_of_unfinished_migrated_TXs_lock.Lock()
-
 		pending_tx_set = append(pending_tx_set, pendingtxs...)
 		num_of_shard_not_sending_pending--
 		if num_of_shard_not_sending_pending == 0 {
 			fmt.Println("所有分片都发送了pending！\n")
-			tx_set := pending_tx_set
-			// tx_set := append(commit_tx_set, pending_tx_set...)
-			new_addr2shard := map[string]int{}
-			new_addrs := []string{}
-			algorithmbegin := time.Now().UnixMilli()
-			if params.Config.PorC == "PageRank" {
+			tx_set = append([]*core.Transaction(nil), pending_tx_set...)
+			pending_tx_set = []*core.Transaction{}
+			num_of_shard_not_sending_pending = params.Config.Shard_num
+		}
+		num_of_shard_not_sending_pending_lock.Unlock()
+		pending_tx_set_lock.Unlock()
+
+		if tx_set != nil {
+			go runMigrationFromPending(tx_set)
+		}
+
+	case cNumOfMigratedTXsAddrs:
+		var NumOfMigratedTXsAddrs int
+		err := json.Unmarshal(content, &NumOfMigratedTXsAddrs)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		num_of_shard_not_sending_pending_lock.Lock()
+		num_of_unfinished_migrated_TXs_lock.Lock()
+		num_of_unfinished_migrated_TXs -= NumOfMigratedTXsAddrs
+		if num_of_shard_not_sending_pending == 0 {
+			fmt.Println("所有pending交易都迁移完成！\n")
+		}
+		num_of_unfinished_migrated_TXs_lock.Unlock()
+		num_of_shard_not_sending_pending_lock.Unlock()
+
+	case cUnchangedState:
+		var UnchangedState int
+		err := json.Unmarshal(content, &UnchangedState)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		num_of_unfinished_migration_lock.Lock()
+		num_of_unfinished_migration -= UnchangedState
+		num_of_unfinished_migration_lock.Unlock()
+
+	default:
+		log.Panic()
+	}
+
+}
+
+func runMigrationFromPending(tx_set []*core.Transaction) {
+	new_addr2shard := map[string]int{}
+	new_addrs := []string{}
+	algorithmbegin := time.Now().UnixMilli()
+	if params.Config.PorC == "PageRank" {
 				//pagerank
 				graph, addrs := algorithm.Pagerank_Tx2graph_And_Addrs(tx_set)
 				Numbda := 0.85
@@ -562,59 +658,22 @@ func handle(data []byte) {
 					account.Account2Shard[addr] = shard
 				}
 			}
-			algorithmend := time.Now().UnixMilli()
-			num_of_unfinished_migration = len(new_addrs)
-			num_of_unfinished_migrated_TXs = len(new_addrs)
+	algorithmend := time.Now().UnixMilli()
+	num_of_unfinished_migration_lock.Lock()
+	num_of_unfinished_migrated_TXs_lock.Lock()
+	num_of_unfinished_migration = len(new_addrs)
+	num_of_unfinished_migrated_TXs = len(new_addrs)
+	num_of_unfinished_migrated_TXs_lock.Unlock()
+	num_of_unfinished_migration_lock.Unlock()
 
-			SendNewAddr2Shard(new_addrs, new_addr2shard)
-			s := fmt.Sprintf("%v %v", algorithmend-StartTime, algorithmend-algorithmbegin)
-			migrationlog.Write(strings.Split(s, " "))
-			migrationlog.Flush()
+	SendNewAddr2Shard(new_addrs, new_addr2shard)
+	s := fmt.Sprintf("%v %v", algorithmend-StartTime, algorithmend-algorithmbegin)
+	migrationlog.Write(strings.Split(s, " "))
+	migrationlog.Flush()
 
-			num_of_shard_not_sending_pending = params.Config.Shard_num
-			// max_commit = params.Config.Max_Commit
-			commit_tx_set = []*core.Transaction{}
-			pending_tx_set = []*core.Transaction{}
-		}
-
-		num_of_unfinished_migrated_TXs_lock.Unlock()
-		num_of_unfinished_migration_lock.Unlock()
-		commit_tx_set_lock.Unlock()
-		// max_commit_lock.Unlock()
-		num_of_shard_not_sending_pending_lock.Unlock()
-		pending_tx_set_lock.Unlock()
-
-	case cNumOfMigratedTXsAddrs:
-		var NumOfMigratedTXsAddrs int
-		err := json.Unmarshal(content, &NumOfMigratedTXsAddrs)
-		if err != nil {
-			log.Panic(err)
-		}
-
-		num_of_shard_not_sending_pending_lock.Lock()
-		num_of_unfinished_migrated_TXs_lock.Lock()
-		num_of_unfinished_migrated_TXs -= NumOfMigratedTXsAddrs
-		if num_of_shard_not_sending_pending == 0 {
-			fmt.Println("所有pending交易都迁移完成！\n")
-		}
-		num_of_unfinished_migrated_TXs_lock.Unlock()
-		num_of_shard_not_sending_pending_lock.Unlock()
-
-	case cUnchangedState:
-		var UnchangedState int
-		err := json.Unmarshal(content, &UnchangedState)
-		if err != nil {
-			log.Panic(err)
-		}
-
-		num_of_unfinished_migration_lock.Lock()
-		num_of_unfinished_migration -= UnchangedState
-		num_of_unfinished_migration_lock.Unlock()
-
-	default:
-		log.Panic()
-	}
-
+	commit_tx_set_lock.Lock()
+	commit_tx_set = []*core.Transaction{}
+	commit_tx_set_lock.Unlock()
 }
 
 // func CountTx(path string) int {
@@ -650,7 +709,11 @@ func Sendtime(t int64) {
 		log.Panic(err)
 	}
 	m := jointMessage(cLLT, time)
-	for _, nodes := range params.NodeTable {
+	for _, shardID := range params.ActiveShardIDs() {
+		nodes := params.NodeTable[shardID]
+		if nodes == nil {
+			continue
+		}
 		for _, node := range nodes {
 			utils.TcpDial(m, node)
 			fmt.Printf("客户端发送初始时间：%v\n", t)
@@ -702,10 +765,11 @@ func SendEpochChange() {
 
 	message := jointMessage(cEpochCh, nil)
 
-	for k, v := range params.NodeTable {
-		// if k == params.Config.ShardID {
-		// 	continue
-		// }
+	for _, k := range params.ActiveShardIDs() {
+		v := params.NodeTable[k]
+		if v == nil {
+			continue
+		}
 		target_leader := v["N0"]
 		fmt.Printf("正在向分片%v的主节点发送epochCHANGE消息\n", k)
 		go utils.TcpDial(message, target_leader)
@@ -713,25 +777,59 @@ func SendEpochChange() {
 }
 
 func SendMigrateWanted() {
-	// str := "epochchange"
-	// ec, err := json.Marshal(str)
-	// if err != nil {
-	// 	log.Panic(err)
-	// }
+	pending_tx_set_lock.Lock()
+	pending_tx_set = []*core.Transaction{}
+	pending_tx_set_lock.Unlock()
+	num_of_shard_not_sending_pending_lock.Lock()
+	num_of_shard_not_sending_pending = params.Config.Shard_num
+	num_of_shard_not_sending_pending_lock.Unlock()
 
 	message := jointMessage(cMigrateWanted, nil)
 
-	for k, v := range params.NodeTable {
-		// if k == params.Config.ShardID {
-		// 	continue
-		// }
+	for _, k := range params.ActiveShardIDs() {
+		v := params.NodeTable[k]
+		if v == nil {
+			continue
+		}
 		target_leader := v["N0"]
 		fmt.Printf("正在向分片%v的主节点发送MigrateWanted消息\n", k)
 		go utils.TcpDial(message, target_leader)
 	}
 }
 
+// waitForShardLeaders 轮询各活跃分片 N0 的监听端口，避免客户端早于分片进程就绪拨号。
+func waitForShardLeaders(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	ids := params.ActiveShardIDs()
+	for time.Now().Before(deadline) {
+		allUp := true
+		for _, shard := range ids {
+			v := params.NodeTable[shard]
+			if v == nil {
+				continue
+			}
+			addr := v["N0"]
+			c, err := net.DialTimeout("tcp", addr, 800*time.Millisecond)
+			if err != nil {
+				allUp = false
+				break
+			}
+			_ = c.Close()
+		}
+		if allUp {
+			return
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	log.Printf("waitForShardLeaders: 超时 %v，仍继续发送映射（部分 N0 可能尚未就绪）", timeout)
+}
+
 func SendNewAddr2Shard(new_addrs []string, new_addr2shard map[string]int) {
+	if len(new_addrs) == 0 && len(new_addr2shard) == 0 {
+		return
+	}
+	waitForShardLeaders(120 * time.Second)
+
 	nam := &NaM{new_addrs, new_addr2shard}
 	na, err := json.Marshal(&nam)
 	if err != nil {
@@ -741,7 +839,11 @@ func SendNewAddr2Shard(new_addrs []string, new_addr2shard map[string]int) {
 	message := jointMessage(cNewMap, na)
 	migration_count++
 	fmt.Printf("\n次数：%v  时间：%v\n", migration_count, time.Now().Unix()-StartTime)
-	for k, v := range params.NodeTable {
+	for _, k := range params.ActiveShardIDs() {
+		v := params.NodeTable[k]
+		if v == nil {
+			continue
+		}
 		target_leader := v["N0"]
 		fmt.Printf("正在向分片%v的主节点发送新的映射\n", k)
 		go utils.TcpDial(message, target_leader)
@@ -755,6 +857,14 @@ func Get_Initial_Map(path string, Account2Shard map[string]int) {
 		log.Panic()
 	}
 	defer file.Close()
+
+	dataset_flag := 0
+	if path == "0to999999_BlockTransaction.csv" || path == "300W.csv" || path == "100W.csv" || path == "50W.csv" || path == "20W.csv" || path == "200W.csv" {
+		dataset_flag = 1
+	}
+	if path == "selectedTxs_300K.csv" {
+		dataset_flag = 2
+	}
 
 	r := csv.NewReader(file)
 	_, err = r.Read()
@@ -771,8 +881,29 @@ func Get_Initial_Map(path string, Account2Shard map[string]int) {
 		if err == io.EOF {
 			break
 		}
-		// 所有交易读入内存（不再只是读入本分片交易
-		senderstr, recipientstr := row[1][2:], row[2][2:]
+		var senderstr, recipientstr string
+		if dataset_flag == 1 {
+			if len(row) < 8 {
+				continue
+			}
+			if len(row[3]) < 2 || len(row[4]) < 2 {
+				continue
+			}
+			if row[5] != "None" || row[6] == "1" || row[7] == "1" || len(row[4][2:]) != 40 || len(row[3][2:]) != 40 || row[4] == row[3] {
+				continue
+			}
+			senderstr, recipientstr = row[3][2:], row[4][2:]
+		} else if dataset_flag == 2 {
+			if len(row) < 9 || len(row[3]) < 2 || len(row[4]) < 2 {
+				continue
+			}
+			senderstr, recipientstr = row[3][2:], row[4][2:]
+		} else {
+			if len(row) < 3 || len(row[1]) < 2 || len(row[2]) < 2 {
+				continue
+			}
+			senderstr, recipientstr = row[1][2:], row[2][2:]
+		}
 
 		//将初始账户的映射弄好
 		Account2Shard[senderstr] = utils.Addr2Shard(senderstr)
@@ -919,8 +1050,13 @@ func InjectTXS(txs []*core.Transaction) {
 		account.Account2ShardLock.Unlock()
 		sendtxlock.Unlock()
 
-		for k, v := range params.NodeTable {
-			ktxs := to_send[params.ShardTable[k]]
+		for _, k := range params.ActiveShardIDs() {
+			v := params.NodeTable[k]
+			if v == nil {
+				continue
+			}
+			sid := params.ShardTable[k]
+			ktxs := to_send[sid]
 			if len(ktxs) != 0 {
 				target_leader := v["N0"]
 				c := TxFromClient{
@@ -945,6 +1081,7 @@ func InjectTXS(txs []*core.Transaction) {
 			// fmt.Println("注入10000")
 			fmt.Printf("注入%v\n", cnt)
 			fmt.Println()
+			atomic.StoreUint32(&injectDone, 1)
 			break
 		}
 	}

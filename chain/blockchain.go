@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +29,21 @@ import (
 var (
 	blocktimelog, queuelenlog *csv.Writer
 )
+
+func boltDBPath(cfg *params.ChainConfig) string {
+	return cfg.ShardID + "_" + cfg.NodeID + "_blockchain_db"
+}
+
+func trieDBPath(cfg *params.ChainConfig) string {
+	return filepath.Join("record", "triedb", cfg.ShardID+"_"+cfg.NodeID)
+}
+
+// 清理本节点本地链数据（Bolt 区块库 + LevelDB 状态 trie），用于存储不一致时自动恢复。
+func wipeLocalChainState(cfg *params.ChainConfig) {
+	_ = os.Remove(boltDBPath(cfg))
+	_ = os.Remove(boltDBPath(cfg) + ".lock")
+	_ = os.RemoveAll(trieDBPath(cfg))
+}
 
 type BlockChain struct {
 	ChainConfig *params.ChainConfig // Chain configuration
@@ -52,8 +68,18 @@ type BlockChain struct {
 }
 
 func NewBlockChain(chainConfig *params.ChainConfig) (*BlockChain, error) {
+	return newBlockChain(chainConfig, true)
+}
+
+func newBlockChain(chainConfig *params.ChainConfig, allowReset bool) (*BlockChain, error) {
 	var err error
 	if chainConfig.NodeID == "N0" {
+		// 节点可能先于 client 启动；此时 log 目录尚未由 client 创建。
+		// 为避免启动阶段因日志路径不存在而 panic，这里主动确保目录存在。
+		if err := os.MkdirAll("./log", 0755); err != nil {
+			log.Panic("Encountered an error: " + err.Error())
+		}
+
 		csvFile, err := os.Create("./log/" + chainConfig.ShardID + "_blocktime.csv")
 		if err != nil {
 			log.Panic("Encountered an error: " + err.Error())
@@ -84,8 +110,10 @@ func NewBlockChain(chainConfig *params.ChainConfig) (*BlockChain, error) {
 		TXann_pool:  core.NewTXannPool(),
 		TXns_pool:   core.NewTXnsPool(),
 	}
-	//filepath
-	fp := "./record/triedb/" + chainConfig.ShardID + "_" + chainConfig.NodeID
+	fp := trieDBPath(chainConfig)
+	if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
+		log.Panic("Encountered an error: " + err.Error())
+	}
 	// cache=0 和 handles=1 只要小于16，都会被设为16
 	bc.db, err = rawdb.NewLevelDBDatabase(fp, 0, 1, "accountState", false)
 	if err != nil {
@@ -121,7 +149,19 @@ func NewBlockChain(chainConfig *params.ChainConfig) (*BlockChain, error) {
 	// check the existence of the trie database
 	_, err = trie.New(trie.TrieID(common.BytesToHash(block.Header.StateRoot)), triedb)
 	if err != nil {
-		log.Panic()
+		if allowReset {
+			log.Printf("[%s %s] 状态 trie 与区块库不一致 (%v)，清理本地数据后重新创世…",
+				chainConfig.ShardID, chainConfig.NodeID, err)
+			if bc.db != nil {
+				bc.db.Close()
+			}
+			if bc.Storage != nil && bc.Storage.DB != nil {
+				_ = bc.Storage.DB.Close()
+			}
+			wipeLocalChainState(chainConfig)
+			return newBlockChain(chainConfig, false)
+		}
+		log.Panic(err)
 	}
 	fmt.Println("The status trie can be built")
 

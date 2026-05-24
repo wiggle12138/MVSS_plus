@@ -6,24 +6,31 @@ import (
 	"blockEmulator/params"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 )
 
 func (p *Pbft) handleTxFromClient(content []byte) {
+	// 处理客户端发送的交易，放入交易池
 	txsFromClient := new(TxFromClient)
 	err := json.Unmarshal(content, txsFromClient)
 	if err != nil {
 		log.Panic(err)
 	}
+	incoming := len(txsFromClient.Txs)
+	fmt.Printf("[handleTxFromClient] %s %s recv client batch, tx_count=%d\n",
+		params.Config.ShardID, p.Node.nodeID, incoming)
+
 	tx2 := make([]*core.Transaction, 0)
 	p.Node.CurChain.Tx_pool.Lock.Lock()
-	account.Account2ShardLock.Lock()
 	j := 0
 	self_shardID := params.ShardTable[params.Config.ShardID]
 	if !params.Config.Not_Lock_immediately {
 		for _, tx := range txsFromClient.Txs {
-			senderSID := account.Account2Shard[hex.EncodeToString(tx.Sender)]
+			senderStr := hex.EncodeToString(tx.Sender)
+			// 必须用 Addr2Shard：分片节点进程里 Account2Shard 往往未预填，直接读 map 缺键会得到 0，误判为分片0。
+			senderSID := account.Addr2Shard(senderStr)
 			if senderSID == self_shardID {
 				from, to := hex.EncodeToString(tx.Sender), hex.EncodeToString(tx.Recipient)
 				if !params.Config.Stop_When_Migrating && params.Config.Not_Lock_Acc_When_Migrating {
@@ -84,7 +91,8 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 
 	if params.Config.Not_Lock_immediately {
 		for _, tx := range txsFromClient.Txs {
-			senderSID := account.Account2Shard[hex.EncodeToString(tx.Sender)]
+			senderStr := hex.EncodeToString(tx.Sender)
+			senderSID := account.Addr2Shard(senderStr)
 			if senderSID == self_shardID {
 				txsFromClient.Txs[j] = tx
 				j++
@@ -100,6 +108,10 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 	if len(tx2) != 0 {
 		p.TrySendTX(tx2)
 	}
-	account.Account2ShardLock.Unlock()
+	queued := len(txsFromClient.Txs)
+	qLen := len(p.Node.CurChain.Tx_pool.Queue)
+	fmt.Printf("[handleTxFromClient] %s %s append to Tx_pool.Queue: local_queued=%d forward_other_shard=%d Queue_total_len=%d\n",
+		params.Config.ShardID, p.Node.nodeID, queued, len(tx2), qLen)
+
 	p.Node.CurChain.Tx_pool.Lock.Unlock()
 }

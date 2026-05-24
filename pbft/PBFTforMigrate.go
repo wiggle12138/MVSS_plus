@@ -309,7 +309,11 @@ func (p *Pbft) SendOut(out map[string]int) {
 		if k == config.ShardID {
 			continue
 		}
-		outs := outpool[params.ShardTable[k]] //从outpool映射中获取与当前节点键k对应的输出池outs
+		sid := params.ShardTable[k]
+		if sid < 0 || sid >= config.Shard_num {
+			continue
+		}
+		outs := outpool[sid] //从outpool映射中获取与当前节点键k对应的输出池outs
 		if outs != nil {
 			target_leader := v["N0"] //从节点值v中获取目标主节点target_leader
 			outs.ShardID = config.ShardID

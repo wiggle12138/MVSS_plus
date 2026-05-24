@@ -89,16 +89,23 @@ type Pbft struct {
 
 	// 延迟发送tryout，因此要有个池子存着
 	TryOutPool [][]*core.TXmig2
+
+	// 仅用于“首块门控”：记录本节点启动时的首个 sequenceID。
+	// 当 ClientSendTX=true 时，Propose 仅在 sequenceID==bootstrapSeqID 阶段要求交易池非空；
+	// 一旦首块产生，后续即使交易池为空也按固定间隔正常出块。
+	bootstrapSeqID int
 }
 
 func NewPBFT() *Pbft {
 	config := params.Config
+	account.InitGlobals()
 	p := new(Pbft)
 	p.Node.nodeID = config.NodeID
 	p.Node.addr = params.NodeTable[config.ShardID][config.NodeID]
 
 	p.Node.CurChain, _ = chain.NewBlockChain(config)
 	p.sequenceID = p.Node.CurChain.CurrentBlock.Header.Number + 1
+	p.bootstrapSeqID = p.sequenceID
 	p.messagePool = make(map[string]*Request)
 	p.prePareConfirmCount = make(map[string]map[string]bool)
 	p.commitConfirmCount = make(map[string]map[string]bool)
@@ -126,10 +133,21 @@ func NewPBFT() *Pbft {
 		sendoutfinish = make(chan int)
 	}
 
+	// 日志 writer 只需在各分片主节点初始化一次。
+	// 若未初始化，N0 在 commit 流程写 CSV 时会出现 nil pointer panic。
+	if config.NodeID == "N0" {
+		NewLog(config.ShardID)
+	}
+
 	return p
 }
 
 func NewLog(shardID string) {
+	// 节点可能先于 client 启动；此时 log 目录未必存在。
+	if err := os.MkdirAll("./log", 0755); err != nil {
+		log.Panic("Encountered an error: " + err.Error())
+	}
+
 	csvFile, err := os.Create("./log/" + shardID + "_block.csv")
 	if err != nil {
 		log.Panic("Encountered an error: " + err.Error())
@@ -198,6 +216,7 @@ func (p *Pbft) handleRequest(data []byte) {
 	case cSendBlock:
 		p.handleSendBlock(content)
 	case cClient:
+		// 处理注入的交易，放入交易池
 		go p.handleTxFromClient(content)
 	case cRelay:
 		go p.handleRelay(content)
@@ -228,21 +247,61 @@ func (p *Pbft) handleRequest(data []byte) {
 // 生成一个区块并发起共识
 func (p *Pbft) Propose() {
 	config := params.Config
+	shardTag := params.Config.ShardID + " " + p.Node.nodeID
+	firstTxWaitSpin := 0
 	for {
+		// 启动优化：客户端注入模式下，仅首块要求本地交易池已有交易。
+		// 避免节点先于 client 注入而连续产生空块；首块之后恢复固定间隔出块语义。
+		if config.ClientSendTX && p.sequenceID == p.bootstrapSeqID {
+			p.Node.CurChain.Tx_pool.Lock.Lock()
+			qLen := len(p.Node.CurChain.Tx_pool.Queue)
+			p.Node.CurChain.Tx_pool.Lock.Unlock()
+			if qLen == 0 {
+				firstTxWaitSpin++
+				if firstTxWaitSpin == 1 || firstTxWaitSpin%50 == 0 {
+					fmt.Printf("[Propose wait-first-tx] %s seq=%d Queue_len=0，首块等待交易注入后再出块\n",
+						shardTag, p.sequenceID)
+				}
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if firstTxWaitSpin > 0 {
+				fmt.Printf("[Propose wait-first-tx] %s 首块已检测到交易，结束等待，Queue_len=%d\n", shardTag, qLen)
+			}
+		}
+
 		if config.Stop_When_Migrating {
 			p.epochLock.Lock() //确保系统处于非停止状态
 		}
-		// time.Sleep(time.Duration(config.Block_interval) * time.Millisecond)
+		spin := 0
 		for {
 			p.pbftlock.Lock()
-			if int(time.Now().Unix()-InitTime) >= (p.epoch-1)*config.Block_interval && int(time.Now().Unix()-lastpropose) >= config.Block_interval {
+			now := time.Now().Unix()
+			ep := p.epoch
+			wallGap := int(now - InitTime)
+			needWall := (ep - 1) * config.Block_interval
+			lastGap := int(now - lastpropose)
+			needLast := config.Block_interval
+			ok1 := wallGap >= needWall
+			ok2 := lastGap >= needLast
+			if ok1 && ok2 {
 				p.epoch++
 				p.pbftlock.Unlock()
+				fmt.Printf("[Propose] %s 时间条件满足: epoch=%d->%d now=%d InitTime=%d lastpropose=%d wallGap=%d>=%d lastGap=%d>=%d → propose1\n",
+					shardTag, ep, p.epoch, now, InitTime, lastpropose, wallGap, needWall, lastGap, needLast)
 				break
 			}
 			p.pbftlock.Unlock()
+			spin++
+			if spin == 1 || spin%50 == 0 {
+				fmt.Printf("[Propose wait] %s spin=%d epoch=%d now=%d InitTime=%d lastpropose=%d wallGap=%d need>=%d ok1=%v lastGap=%d need>=%d ok2=%v\n",
+					shardTag, spin, ep, now, InitTime, lastpropose, wallGap, needWall, ok1, lastGap, needLast, ok2)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
+		fmt.Printf("[Propose] %s 等待 sequenceLock…\n", shardTag)
 		p.sequenceLock.Lock() //通过锁强制要求上一个区块commit完成新的区块才能被提出
+		fmt.Printf("[Propose] %s 已持有 sequenceLock，seqID=%d 即将 propose1\n", shardTag, p.sequenceID)
 		// if p.epoch != 2 {
 		// 	time.Sleep(time.Duration(utils.RandInt0To3(InitTime+int64(p.epoch))) * time.Second)  //随机等待0~3秒
 		// }
@@ -737,6 +796,7 @@ func (p *Pbft) handleCommit(content []byte) {
 						Txs:              commit_txs,
 						BlockSize:        len(block.TXmig1s) + len(block.TXmig2s) + len(block.Anns) + len(block.NSs) + len(block.Transactions),
 						Num_of_New_State: len(block.NSs),
+						ShardID:          params.Config.ShardID,
 					}
 					//主节点向客户端发送已确认上链的交易集
 					c, err := json.Marshal(commitTX_numofNS)
@@ -744,7 +804,7 @@ func (p *Pbft) handleCommit(content []byte) {
 						log.Panic(err)
 					}
 					m := jointMessage(cReply, c)
-					utils.TcpDial(m, params.ClientAddr)
+					go utils.TcpDial(m, params.ClientAddr) // 勿阻塞 commit：否则长时间占 sequenceLock，Propose 无法进入下一轮
 
 					if p.sequenceID == 1 && (params.Config.Bu_Tong_Bi_Li || params.Config.Bu_Tong_Shi_Jian || (params.Config.Fail && !params.Config.Bu_Tong_Bi_Li_2) || params.Config.Cross_Chain) {
 						t := time.Now().UnixMilli()
@@ -1072,7 +1132,11 @@ func (p *Pbft) TryRelay(relaytxs, alltxs []*core.Transaction, st *trie.Trie, num
 		if k == config.ShardID {
 			continue
 		}
-		txs := relaypool[params.ShardTable[k]]
+		sid := params.ShardTable[k]
+		if sid < 0 || sid >= config.Shard_num {
+			continue
+		}
+		txs := relaypool[sid]
 		if len(txs) != 0 {
 			target_leader := v["N0"]
 			r := Relay{
@@ -1105,7 +1169,11 @@ func (p *Pbft) TryRelay2(relaytxs []*core.TXrelay) {
 		if k == config.ShardID {
 			continue
 		}
-		txs := relaypool[params.ShardTable[k]]
+		sid := params.ShardTable[k]
+		if sid < 0 || sid >= config.Shard_num {
+			continue
+		}
+		txs := relaypool[sid]
 		if len(txs) != 0 {
 			target_leader := v["N0"]
 			r := Relay{
@@ -1129,7 +1197,7 @@ func (p *Pbft) TrySendTX(txs []*core.Transaction) {
 
 	sendpool := make([][]*core.Transaction, config.Shard_num)
 	for _, v := range txs {
-		shardID := account.Account2Shard[hex.EncodeToString(v.Sender)]
+		shardID := account.Addr2Shard(hex.EncodeToString(v.Sender))
 		sendpool[shardID] = append(sendpool[shardID], v)
 	}
 
@@ -1137,7 +1205,11 @@ func (p *Pbft) TrySendTX(txs []*core.Transaction) {
 		if k == config.ShardID {
 			continue
 		}
-		txs := sendpool[params.ShardTable[k]]
+		sid := params.ShardTable[k]
+		if sid < 0 || sid >= config.Shard_num {
+			continue
+		}
+		txs := sendpool[sid]
 		if len(txs) != 0 {
 			target_leader := v["N0"]
 			r := TxFromClient{
@@ -1264,7 +1336,11 @@ func (p *Pbft) TryTXmig1(txmig1s []*core.TXmig1, outbalance map[string]*big.Int,
 			if k == config.ShardID {
 				continue
 			}
-			txmig2s := txmig2pool[params.ShardTable[k]]
+			sid := params.ShardTable[k]
+			if sid < 0 || sid >= config.Shard_num {
+				continue
+			}
+			txmig2s := txmig2pool[sid]
 			if len(txmig2s) != 0 {
 				target_leader := v["N0"]
 				o := Mig2{
@@ -1367,6 +1443,10 @@ func (p *Pbft) TryAnnounce(txmig2s []*core.TXmig2, st, migTree *trie.Trie) {
 
 	for k, v := range params.NodeTable {
 		if k == config.ShardID {
+			continue
+		}
+		sid := params.ShardTable[k]
+		if sid < 0 || sid >= config.Shard_num {
 			continue
 		}
 		target_leader := v["N0"]
@@ -1713,27 +1793,23 @@ func (p *Pbft) handleChangesAndPendings(content []byte) {
 func (p *Pbft) handleMigrateWanted() {
 	fmt.Println("本节点已接收到client发来准备迁移通知")
 
+	// 仅短暂持锁拷贝队列，避免长时间占用 sequenceLock / Account2ShardLock 阻塞出块与 handleNewMap。
 	p.sequenceLock.Lock()
-	p.Node.CurChain.Tx_pool.Relaypoollock.Lock()
-	fmt.Println(1)
 	p.Node.CurChain.Tx_pool.Lock.Lock()
-	fmt.Println(2)
-	account.Account2ShardLock.Lock()
-	fmt.Println(3)
-
-	// 将 交易池中的交易发给 client
-	c, err := json.Marshal(&p.Node.CurChain.Tx_pool.Queue)
-	if err != nil {
-		log.Panic(err)
-	}
-	m := jointMessage(cPendingTXs, c)
-	utils.TcpDial(m, params.ClientAddr)
-	fmt.Println("本节点已将pending发送到client\n")
-
-	account.Account2ShardLock.Unlock()
+	queueCopy := make([]*core.Transaction, len(p.Node.CurChain.Tx_pool.Queue))
+	copy(queueCopy, p.Node.CurChain.Tx_pool.Queue)
 	p.Node.CurChain.Tx_pool.Lock.Unlock()
-	p.Node.CurChain.Tx_pool.Relaypoollock.Unlock()
 	p.sequenceLock.Unlock()
+
+	go func() {
+		c, err := json.Marshal(&queueCopy)
+		if err != nil {
+			log.Panic(err)
+		}
+		m := jointMessage(cPendingTXs, c)
+		utils.TcpDial(m, params.ClientAddr)
+		fmt.Printf("本节点已将 pending 发送到 client（%d 笔）\n", len(queueCopy))
+	}()
 }
 
 func (p *Pbft) handleEpochChange() {
@@ -1792,14 +1868,24 @@ func (p *Pbft) handleNewMap(content []byte) {
 
 }
 
-// 接收到初始时间inittime
+// 接收到初始时间 inittime（与 Propose 里 InitTime 锚点一致）
 func (p *Pbft) handleLLT(content []byte) {
 	var inittime int64
 	err := json.Unmarshal(content, &inittime)
 	if err != nil {
 		log.Panic(err)
 	}
-	fmt.Printf("本节点已接收到客户端发送的初始时间：%v\n", inittime)
-	InitTime = inittime
-	core.InitTime = inittime
+	now := time.Now().Unix()
+	anchor := inittime
+	if anchor > now {
+		anchor = now
+	}
+	p.pbftlock.Lock()
+	// 前两块在 InitTime==0 时 epoch 已累加；锚定后若不重置，(epoch-1)*Block_interval 会要求过长的墙钟差才允许下一块。
+	p.epoch = 1
+	InitTime = anchor
+	core.InitTime = InitTime
+	lastpropose = time.Now().Unix()
+	p.pbftlock.Unlock()
+	fmt.Printf("本节点已接收到客户端发送的初始时间：%v（锚定 InitTime=%v，已重置 epoch=1）\n", inittime, InitTime)
 }

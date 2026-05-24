@@ -5,7 +5,7 @@ import (
 )
 
 func main() {
-	println("enter main")
+	//println("enter main")
 	test.Test_shard()
-	println("exit main")
+	//println("exit main")
 }

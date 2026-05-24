@@ -18,6 +18,8 @@ type ChainConfig struct {
 	MaxRelayBlockSize       int
 	MinRelayBlockSize       int
 	Inject_speed            int // tx count per second
+	// MaxInjectTxs 仅客户端加载/注入前 N 笔交易；0 表示不限制（全量如 300K）。用于联调、看块是否含交易。
+	MaxInjectTxs int
 	Max_Commit              int // 确认多少个交易后就迁移
 	Max_Commit_Block        int // 确认多少个区块后就迁移，要×分片数量
 	ClientSendTX            bool
@@ -52,7 +54,7 @@ var (
 			//"N2": "10.206.16.5:8012",
 			//"N3": "10.206.16.5:8013",
 			"N0": "127.0.0.1:8010",
-			//"N1": "127.0.0.1:8011",
+			"N1": "127.0.0.1:8011",
 			//"N2": "127.0.0.1:8012",
 			//"N3": "127.0.0.1:8013",
 		},
@@ -62,7 +64,7 @@ var (
 			//"N2": "10.206.16.48:8022",
 			//"N3": "10.206.16.48:8023",
 			"N0": "127.0.0.1:8020",
-			//"N1": "127.0.0.1:8021",
+			"N1": "127.0.0.1:8021",
 			//"N2": "127.0.0.1:8022",
 			//"N3": "127.0.0.1:8023",
 		},
@@ -71,7 +73,7 @@ var (
 			//"N1": "10.206.16.18:8031",
 			//"N2": "10.206.16.18:8032",
 			//"N3": "10.206.16.18:8033",
-			"N0": "127.0.0.1:8030",
+			//"N0": "127.0.0.1:8030",
 			//"N1": "127.0.0.1:8031",
 			//"N2": "127.0.0.1:8032",
 			//"N3": "127.0.0.1:8033",
@@ -81,7 +83,7 @@ var (
 			//"N1": "10.206.16.8:8041",
 			//"N2": "10.206.16.8:8042",
 			//"N3": "10.206.16.8:8043",
-			"N0": "127.0.0.1:8040",
+			//"N0": "127.0.0.1:8040",
 			//"N1": "127.0.0.1:8041",
 			//"N2": "127.0.0.1:8042",
 			//"N3": "127.0.0.1:8043",
@@ -401,9 +403,10 @@ var (
 		MaxRelayBlockSize:       10,
 		MinRelayBlockSize:       1,
 		Inject_speed:            400,
+		MaxInjectTxs:            20000,
 		Relay_interval:          1000,
 		Max_Commit:              50000,
-		Max_Commit_Block:        100,
+		Max_Commit_Block:        20,
 		ClientSendTX:            true,
 		Stop_When_Migrating:     false,
 		Lock_Acc_When_Migrating: false,
@@ -488,3 +491,19 @@ var (
 	Init_balance string = "10000000000000000000000000000000000000000" //40个0
 	// Init_balance float64 = 200
 )
+
+// ActiveShardIDs returns shard string IDs for the current Config.Shard_num (e.g. S0,S1 when Shard_num=2).
+// Use this when broadcasting so NodeTable entries for unused shards (e.g. S2,S3) are not dialed.
+func ActiveShardIDs() []string {
+	n := Config.Shard_num
+	if n <= 0 {
+		return nil
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if s, ok := ShardTableInt2Str[i]; ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}

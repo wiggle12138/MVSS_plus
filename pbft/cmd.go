@@ -114,9 +114,11 @@ type NaM struct {
 }
 
 type Txs_and_Num_of_New_State struct {
-	Txs []*core.Transaction
-	BlockSize int
+	Txs              []*core.Transaction
+	BlockSize        int
 	Num_of_New_State int
+	// ShardID 由出块分片主节点填入，供客户端按分片统计连续空块（避免某分片长期空块误触发全局停止）。
+	ShardID string `json:"ShardID,omitempty"`
 }
 
 // low latency
