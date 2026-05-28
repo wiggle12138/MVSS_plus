@@ -23,6 +23,7 @@ type Transaction struct {
 	RecLock              bool
 	Value                *big.Int `json:"value"`
 	RequestTime          int64
+	ClientTimestamp      int64 // CSV 客户端逻辑时间戳；OrderList 排序用
 	Second_RequestTime   int64
 	TXmig1_Time          int64
 	TXmig2_Time          int64
@@ -37,6 +38,14 @@ type Transaction struct {
 	Relay_Lock           bool
 	Nonce                uint64
 	RedirectTag          []byte // MVSS+ 迁移期新交易重定向标签
+}
+
+// OrderTimestamp 返回用于 MVSS 逻辑排序的时间戳（优先 ClientTimestamp）。
+func (tx *Transaction) OrderTimestamp() int64 {
+	if tx.ClientTimestamp > 0 {
+		return tx.ClientTimestamp
+	}
+	return tx.RequestTime
 }
 
 func (tx *Transaction) PrintTx() {

@@ -10,15 +10,21 @@ import (
 type MigrationStrategy string
 
 const (
-	// StrategyOriginal 原工程近似路径（Not_Lock + CaP，未完整实现论文 MVSS）。
+	// StrategyOriginal 原 BlockEmulator 工程近似路径（Not_Lock + CaP，非论文 MVSS）。
 	StrategyOriginal MigrationStrategy = "original"
-	// StrategyMVSS 论文 MVSS 实现（分流 + TX_sync + nonce/RedirectTag 等，Phase1 主线）。
+	// StrategyMVSS 论文 MVSS 实现（分流 + TX_sync + nonce/RedirectTag 等）。
 	StrategyMVSS MigrationStrategy = "MVSS"
 	// StrategyMVSSDelta 论文 MVSS-Delta（在 MVSS 基础上启用增量同步，Phase2）。
 	StrategyMVSSDelta MigrationStrategy = "MVSS-Delta"
-	StrategyLock         MigrationStrategy = "lock"
-	StrategyFinetuned    MigrationStrategy = "finetuned"
-	StrategyStopEpoch    MigrationStrategy = "stop_epoch"
+	// StrategySOTALock 全锁基线（Fine-tuned Lock 论文中的 SOTA Lock；非 LB-Chain）。
+	StrategySOTALock MigrationStrategy = "SOTA-Lock"
+	// StrategyFineTunedLock 半锁基线（Huang et al. INFOCOM'24 Fine-tuned Lock）。
+	StrategyFineTunedLock MigrationStrategy = "Fine-tuned-Lock"
+	StrategyStopEpoch MigrationStrategy = "stop_epoch"
+
+	// 过渡期别名（与上列 canonical 字符串相同，Parse 时统一归一）。
+	StrategyLock      = StrategySOTALock
+	StrategyFinetuned = StrategyFineTunedLock
 )
 
 // ParseMigrationStrategy 解析命令行或配置中的策略名；非法值 panic。
@@ -28,25 +34,24 @@ func ParseMigrationStrategy(s string) MigrationStrategy {
 		return StrategyOriginal
 	case "mvss":
 		return StrategyMVSS
-	// 过渡期别名：旧脚本中的 MVSS+ 即现 StrategyMVSS
 	case "mvss+", "mvss_plus", "mvssplus":
 		return StrategyMVSS
 	case "mvss-delta", "mvss_delta", "mvssdelta":
 		return StrategyMVSSDelta
-	case "lock":
-		return StrategyLock
-	case "finetuned":
-		return StrategyFinetuned
+	case "sota-lock", "sota_lock", "sotalock", "lock":
+		return StrategySOTALock
+	case "fine-tuned-lock", "fine_tuned_lock", "finetunedlock", "finetuned":
+		return StrategyFineTunedLock
 	case "stop_epoch":
 		return StrategyStopEpoch
 	default:
 		switch MigrationStrategy(strings.TrimSpace(s)) {
 		case StrategyOriginal, StrategyMVSS, StrategyMVSSDelta,
-			StrategyLock, StrategyFinetuned, StrategyStopEpoch:
+			StrategySOTALock, StrategyFineTunedLock, StrategyStopEpoch:
 			return MigrationStrategy(strings.TrimSpace(s))
 		}
 		log.Panic(fmt.Sprintf(
-			"未知 MigrationStrategy: %q，可选: original, MVSS, MVSS-Delta, lock, finetuned, stop_epoch",
+			"未知 MigrationStrategy: %q，可选: original, MVSS, MVSS-Delta, SOTA-Lock, Fine-tuned-Lock, stop_epoch（别名 lock/finetuned/MVSS+）",
 			s))
 	}
 	return ""
@@ -69,11 +74,11 @@ func ApplyMigrationStrategy(cfg *ChainConfig) {
 		cfg.Stop_When_Migrating = false
 		cfg.Lock_Acc_When_Migrating = false
 		cfg.Not_Lock_Acc_When_Migrating = true
-	case StrategyLock:
+	case StrategySOTALock:
 		cfg.Stop_When_Migrating = false
 		cfg.Lock_Acc_When_Migrating = true
 		cfg.Not_Lock_Acc_When_Migrating = false
-	case StrategyFinetuned:
+	case StrategyFineTunedLock:
 		cfg.Stop_When_Migrating = false
 		cfg.Lock_Acc_When_Migrating = false
 		cfg.Not_Lock_Acc_When_Migrating = false
@@ -102,6 +107,16 @@ func IsMVSS() bool {
 // IsMVSSDelta 是否为 MVSS-Delta 策略（Phase2 增量同步入口）。
 func IsMVSSDelta() bool {
 	return Config != nil && Config.MigrationStrategy == StrategyMVSSDelta
+}
+
+// IsSOTALock 是否为 SOTA Lock 全锁基线。
+func IsSOTALock() bool {
+	return Config != nil && Config.MigrationStrategy == StrategySOTALock
+}
+
+// IsFineTunedLock 是否为 Fine-tuned Lock 半锁基线。
+func IsFineTunedLock() bool {
+	return Config != nil && Config.MigrationStrategy == StrategyFineTunedLock
 }
 
 // IsMVSSPlus 过渡期别名，等同 IsMVSS。

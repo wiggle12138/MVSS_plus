@@ -16,6 +16,8 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -850,6 +852,45 @@ func SendNewAddr2Shard(new_addrs []string, new_addr2shard map[string]int) {
 	}
 }
 
+func parseClientTimestamp(row []string) int64 {
+	if len(row) <= 9 {
+		return -1
+	}
+	s := strings.TrimSpace(row[9])
+	if s == "" {
+		return -1
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return v
+}
+
+func is300KStyleDatasetPath(path string) bool {
+	base := filepath.Base(path)
+	if base == "selectedTxs_300K.csv" {
+		return true
+	}
+	if strings.HasPrefix(base, "mvss_") && strings.HasSuffix(base, ".csv") {
+		return true
+	}
+	if strings.HasSuffix(base, "_ts.csv") {
+		return true
+	}
+	return false
+}
+
+func is300KStyleRow(row []string) bool {
+	if len(row) < 9 {
+		return false
+	}
+	if len(row[3]) < 42 || len(row[4]) < 42 {
+		return false
+	}
+	return strings.HasPrefix(row[3], "0x") && strings.HasPrefix(row[4], "0x")
+}
+
 func Get_Initial_Map(path string, Account2Shard map[string]int) {
 
 	file, err := os.Open(path)
@@ -862,7 +903,7 @@ func Get_Initial_Map(path string, Account2Shard map[string]int) {
 	if path == "0to999999_BlockTransaction.csv" || path == "300W.csv" || path == "100W.csv" || path == "50W.csv" || path == "20W.csv" || path == "200W.csv" {
 		dataset_flag = 1
 	}
-	if path == "selectedTxs_300K.csv" {
+	if path == "selectedTxs_300K.csv" || is300KStyleDatasetPath(path) {
 		dataset_flag = 2
 	}
 
@@ -919,7 +960,7 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 		dataset_flag = 1
 		fmt.Printf("特殊格式文件 %s\n", path)
 	}
-	if path == "selectedTxs_300K.csv" {
+	if path == "selectedTxs_300K.csv" || is300KStyleDatasetPath(path) {
 		dataset_flag = 2
 		fmt.Printf("300K 格式文件 %s\n", path)
 	}
@@ -952,9 +993,15 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 		var senderstr, recipientstr string
 		var sender, recipient []byte
 		var ok bool
+		clientTS := int64(-1)
+
+		rowFlag := dataset_flag
+		if rowFlag == 0 && is300KStyleRow(row) {
+			rowFlag = 2
+		}
 
 		// 先检查是否为特殊格式
-		if dataset_flag == 1 {
+		if rowFlag == 1 {
 			if len(row) < 9 {
 				continue
 			}
@@ -969,7 +1016,8 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 			if !ok {
 				log.Panic()
 			}
-		} else if dataset_flag == 2 {
+			clientTS = parseClientTimestamp(row)
+		} else if rowFlag == 2 {
 			//300K 格式处理
 			if len(row) < 9 {
 				continue
@@ -991,6 +1039,7 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 				fmt.Printf("300K交易金额解析错误 %v\n", row)
 				continue
 			}
+			clientTS = parseClientTimestamp(row)
 		} else {
 			// 普通格式处理
 			if len(row) < 3 {
@@ -1012,6 +1061,7 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 			Value:              value,
 			Id:                 txid,
 			RequestTime:        -1,
+			ClientTimestamp:    clientTS,
 			Second_RequestTime: -1,
 			TXmig1_Time:        -1,
 			TXmig2_Time:        -1,
@@ -1044,6 +1094,9 @@ func InjectTXS(txs []*core.Transaction) {
 			addr := hex.EncodeToString(txs[i].Sender)
 			senderSID := account.Account2Shard[addr]
 			txs[i].RequestTime = time.Now().UnixMilli()
+			if txs[i].ClientTimestamp <= 0 {
+				txs[i].ClientTimestamp = txs[i].RequestTime
+			}
 			txs[i].TxHash = txs[i].Hash()
 			to_send[senderSID] = append(to_send[senderSID], txs[i])
 		}

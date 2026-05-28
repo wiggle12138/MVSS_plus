@@ -18,7 +18,7 @@
 start_2shard_2node.bat
 REM 或指定数据集与迁移策略（MVSS=现有逻辑，MVSS+=新方法接口）：
 start_2shard_2node.bat selectedTxs_300K.csv MVSS
-start_2shard_2node.bat selectedTxs_300K.csv MVSS+
+start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
 ```
 
 脚本会依次启动 **S0-N0、S0-N1、S1-N0、S1-N1** 四个节点窗口，等待数秒后启动 **客户端**（监听 `127.0.0.1:8800`）。节点默认监听 `8010/8011/8020/8021`。
@@ -50,7 +50,7 @@ go run main.go -S 2 -f 0 -c -t selectedTxs_300K.csv --maxInjectTxs 5000
 
 - 全局参数默认值见 `params/config.go`（出块间隔、块大小、注入速率、迁移策略等）。
 - 运行后在 `log/` 下生成各分片的块统计、交易明细、队列长度等 CSV。
-- 更详细的参数说明与代码对照见 `说明文档/`（如 `参数配置.md`、`MVSS.md`）。
+- 更详细的参数说明与代码对照见 `说明文档/`（如 `参数配置.md`、`账户迁移策略对比.md`）。
 
 ## 目录结构
 

@@ -9,7 +9,9 @@ REM   start_2shard_2node.bat selectedTxs_300K.csv
 REM   start_2shard_2node.bat selectedTxs_300K.csv original
 REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS
 REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
-REM   (legacy alias: MVSS+ is accepted as MVSS)
+REM   start_2shard_2node.bat selectedTxs_300K.csv SOTA-Lock
+REM   start_2shard_2node.bat selectedTxs_300K.csv Fine-tuned-Lock
+REM   (aliases: MVSS+, lock, finetuned)
 REM Slow cold build: set NODE_WAIT_SEC=60 before running this bat.
 
 pushd "%~dp0"

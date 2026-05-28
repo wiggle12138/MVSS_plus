@@ -199,6 +199,7 @@ func NewLog(shardID string) {
 	txmig2log = csv.NewWriter(csvFile)
 	txmig2log.Write([]string{"account", "time"})
 	txmig2log.Flush()
+	initSyncLog(shardID)
 }
 
 func (p *Pbft) handleRequest(data []byte) {
@@ -232,6 +233,8 @@ func (p *Pbft) handleRequest(data []byte) {
 		p.handleChangesAndPendings(content)
 	case cTXsync:
 		go p.handleTXsync(content)
+	case cTXsyncDelta:
+		go p.handleTXsyncDelta(content)
 	case cEpochCh:
 		go p.handleEpochChange()
 	case cBalanceAndPending:
@@ -1387,15 +1390,16 @@ func (p *Pbft) handleMig2(content []byte) {
 			}
 			m1 := m2.Txmig1
 			account.SetMigCtx(m1.Address, &account.MigAccountCtx{
-				TargetShard: params.ShardTable[params.Config.ShardID],
-				Mig1Time:    m1.Request_Time,
-				LastCN:      m1.LastCN,
-				SyncNeeded:  m1.Sync,
-				MigNonce:    m1.LastCN,
-				NextNonce:   m1.LastCN,
-				OrderList:   m1.OrderList,
-				PausedTxIDs: make(map[int]bool),
-				FSM:         account.MigFSMActive,
+				TargetShard:   params.ShardTable[params.Config.ShardID],
+				Mig1Time:      m1.Request_Time,
+				LastCN:        m1.LastCN,
+				SyncNeeded:    m1.Sync,
+				MigNonce:      m1.LastCN,
+				NextNonce:     m1.LastCN,
+				OrderList:     m1.OrderList,
+				PausedTxIDs:   make(map[int]bool),
+				FSM:           account.MigFSMActive,
+				LastDeltaHash: nil,
 			})
 		}
 	}

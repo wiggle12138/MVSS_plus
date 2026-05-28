@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 
 	flag "github.com/spf13/pflag"
 )
@@ -27,6 +29,20 @@ var (
 	EndTime int64
 )
 
+func is300KStyleDatasetPath(path string) bool {
+	base := filepath.Base(path)
+	if base == "selectedTxs_300K.csv" {
+		return true
+	}
+	if strings.HasPrefix(base, "mvss_") && strings.HasSuffix(base, ".csv") {
+		return true
+	}
+	if strings.HasSuffix(base, "_ts.csv") {
+		return true
+	}
+	return false
+}
+
 func Test_shard() {
 	flag.IntVarP(&shard_num, "shard_num", "S", 1, "indicate that how many shards are deployed")
 	flag.StringVarP(&shardID, "shardID", "s", "", "id of the shard to which this node belongs, for example, S0")
@@ -35,7 +51,7 @@ func Test_shard() {
 	flag.StringVarP(&testFile, "testFile", "t", "", "path of the input test file")
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
 	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
-	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration: original|MVSS|MVSS-Delta|lock|finetuned|stop_epoch (MVSS+ alias=MVSS; empty=config default)")
+	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration: original|MVSS|MVSS-Delta|SOTA-Lock|Fine-tuned-Lock|stop_epoch (aliases: lock, finetuned, MVSS+; empty=config default)")
 
 	flag.Parse() //解析命令行参数
 
@@ -123,7 +139,7 @@ func Test_shard() {
 				continue
 			}
 			senderstr, recipientstr = row[3][2:], row[4][2:]
-		} else if config.Path == "selectedTxs_300K.csv" {
+		} else if config.Path == "selectedTxs_300K.csv" || is300KStyleDatasetPath(config.Path) {
 			// 与 pbft/client.go Get_Initial_Map_And_TXS 中 dataset_flag==2 一致：地址在列 3/4，金额在列 8
 			if len(row) < 9 {
 				continue

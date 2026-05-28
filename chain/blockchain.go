@@ -417,15 +417,25 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 			account_state.Balance.Set(v.Value)
 			account_state.Migrate = -1
 			account_state.Location = params.ShardTable[bc.ChainConfig.ShardID]
-			// MVSS+：合并 TXsync 带来的待应用状态
-			if params.IsMVSSPlus() {
-				if pending, ok := account.TakeMigPendingState(v.Address); ok {
+			// MVSS：合并同步阶段带来的状态更新。
+			if params.IsMVSS() {
+				if params.IsMVSSDelta() {
+					if d, ok := account.TakeMigPendingDelta(v.Address); ok {
+						nextBal := new(big.Int).Add(account_state.Balance, d.DeltaBalance)
+						if nextBal.Sign() < 0 || d.DeltaNonce < 0 {
+							account.MarkMigAbort(v.Address, "delta 应用后余额/nonce 非法")
+						} else {
+							account_state.Balance.Set(nextBal)
+							account_state.Nonce += uint64(d.DeltaNonce)
+						}
+					}
+				} else if pending, ok := account.TakeMigPendingState(v.Address); ok {
 					account_state.Nonce = pending.Nonce
 					if pending.Balance != nil {
 						account_state.Balance.Set(pending.Balance)
 					}
 				}
-				if v.Txmig1 != nil {
+				if v.Txmig1 != nil && !params.IsMVSSDelta() {
 					account_state.Nonce = v.Txmig1.LastCN
 				}
 			}
@@ -452,8 +462,8 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 				log.Panic()
 			}
 			account_state := account.DecodeAccountState(s_state_enc)
-			// MVSS+：nonce 校验防双花，通过后递增
-			if params.IsMVSSPlus() {
+			// MVSS：nonce 校验防双花，通过后递增
+			if params.IsMVSS() {
 				if tx.Nonce != account_state.Nonce {
 					continue
 				}

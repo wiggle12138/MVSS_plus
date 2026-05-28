@@ -32,6 +32,7 @@ func (p *Pbft) mvssBuildMigCtx(addr string, toShard int, mig1Time int64) *core.T
 	}
 
 	orderList := make(map[int]int64)
+	arrivalList := make(map[int]int64)
 	nextNonce := state.Nonce
 	pending := make([]*core.Transaction, 0)
 	p.Node.CurChain.Tx_pool.Lock.Lock()
@@ -51,10 +52,10 @@ func (p *Pbft) mvssBuildMigCtx(addr string, toShard int, mig1Time int64) *core.T
 	}
 	p.Node.CurChain.Tx_pool.Lock.Unlock()
 
-	// 按到达时间排序后分配 nonce
+	// 按客户端逻辑时间戳排序后分配 nonce
 	for i := 0; i < len(pending); i++ {
 		for j := i + 1; j < len(pending); j++ {
-			if pending[i].RequestTime > pending[j].RequestTime {
+			if pending[i].OrderTimestamp() > pending[j].OrderTimestamp() {
 				pending[i], pending[j] = pending[j], pending[i]
 			}
 		}
@@ -62,31 +63,34 @@ func (p *Pbft) mvssBuildMigCtx(addr string, toShard int, mig1Time int64) *core.T
 	for _, tx := range pending {
 		tx.Nonce = nextNonce
 		nextNonce++
-		orderList[tx.Id] = tx.RequestTime
+		orderList[tx.Id] = tx.OrderTimestamp()
+		arrivalList[tx.Id] = tx.RequestTime
 	}
 
 	syncNeeded := len(pending) > 0
 	ctx := &account.MigAccountCtx{
-		TargetShard: toShard,
-		Mig1Time:    mig1Time,
-		LastCN:      state.Nonce,
-		SyncNeeded:  syncNeeded,
-		MigNonce:    state.Nonce,
-		NextNonce:   nextNonce,
-		OrderList:   orderList,
-		PausedTxIDs: make(map[int]bool),
-		FSM:         account.MigFSMActive,
+		TargetShard:   toShard,
+		Mig1Time:      mig1Time,
+		LastCN:        state.Nonce,
+		SyncNeeded:    syncNeeded,
+		MigNonce:      state.Nonce,
+		NextNonce:     nextNonce,
+		OrderList:     orderList,
+		ArrivalList:   arrivalList,
+		PausedTxIDs:   make(map[int]bool),
+		FSM:           account.MigFSMActive,
+		LastDeltaHash: nil,
 	}
 	account.SetMigCtx(addr, ctx)
 
 	return &core.TXmig1{
-		Address:     addr,
-		FromshardID: params.ShardTable[params.Config.ShardID],
-		ToshardID:   toShard,
+		Address:      addr,
+		FromshardID:  params.ShardTable[params.Config.ShardID],
+		ToshardID:    toShard,
 		Request_Time: mig1Time,
-		Sync:        syncNeeded,
-		OrderList:   orderList,
-		LastCN:      state.Nonce,
+		Sync:         syncNeeded,
+		OrderList:    orderList,
+		LastCN:       state.Nonce,
 	}
 }
 
@@ -102,7 +106,7 @@ func (p *Pbft) mvssRedirectNewTx(tx *core.Transaction) bool {
 	}
 	tx.Nonce = ctx.NextNonce
 	ctx.NextNonce++
-	ctx.OrderList[tx.Id] = tx.RequestTime
+	ctx.RegisterOrder(tx.Id, tx.OrderTimestamp(), tx.RequestTime)
 	account.DetectInterleave(ctx)
 
 	tx.RedirectTag = core.RedirectTag(from, ctx.Mig1Time, ctx.MigNonce)
@@ -162,14 +166,25 @@ func (p *Pbft) TrySendTXsync(syncs []*core.TXsync, targetShardID int) {
 	if err != nil {
 		log.Panic(err)
 	}
+	for _, s := range syncs {
+		if s == nil {
+			continue
+		}
+		writeSyncLog("send", "sync", s.Address, s.StartN, s.EndN, true, "", len(bc))
+	}
 	go utils.TcpDial(jointMessage(cTXsync, bc), leader)
 }
 
 func (p *Pbft) handleTXsync(content []byte) {
+	if params.IsMVSSDelta() {
+		// MVSS-Delta 仅走 TXsyncDelta 路径。
+		return
+	}
 	msg := new(SyncMsg)
 	if err := json.Unmarshal(content, msg); err != nil {
 		log.Panic(err)
 	}
+	writeSyncLog("recv", "sync", "", 0, 0, true, "", len(content))
 	fmt.Printf("[MVSS+] %s 收到分片 %s 的 TXsync，条数=%d\n",
 		params.Config.ShardID, msg.ShardID, len(msg.TXsyncs))
 
@@ -191,6 +206,7 @@ func (p *Pbft) handleTXsync(content []byte) {
 			EndN:        s.EndN,
 			RequestTime: time.Now().UnixMilli(),
 		})
+		writeSyncLog("ack_send", "sync", s.Address, s.StartN, s.EndN, true, "", 0)
 	}
 	if len(reply) == 0 {
 		return
@@ -209,17 +225,19 @@ func (p *Pbft) handleTXsync(content []byte) {
 // mvssApplySync 记录 TXsync 带来的目标分片账户状态，待下次出块合并。
 func (p *Pbft) mvssApplySync(s *core.TXsync) {
 	if s == nil || s.StateNew == nil {
+		writeSyncLog("apply", "sync", "", 0, 0, false, "state_new 为空", 0)
 		return
 	}
 	ns := account.DecodeAccountState(s.StateNew.Encode())
 	ns.Migrate = -1
 	ns.Location = params.ShardTable[params.Config.ShardID]
 	account.SetMigPendingState(s.Address, ns)
+	writeSyncLog("apply", "sync", s.Address, s.StartN, s.EndN, true, "", 0)
 }
 
 // mvssTriggerSyncIfNeeded 块提交后若检测到交错则向目标分片发送 TXsync。
 func (p *Pbft) mvssTriggerSyncIfNeeded(block *core.Block, st *trie.Trie) {
-	if !params.IsMVSSPlus() {
+	if !params.IsMVSS() {
 		return
 	}
 	for _, tx := range block.Transactions {
@@ -242,6 +260,10 @@ func (p *Pbft) mvssTriggerSyncIfNeeded(block *core.Block, st *trie.Trie) {
 		if ctx == nil {
 			continue
 		}
+		if aborted, reason := account.IsMigAborted(addr); aborted {
+			fmt.Printf("[MVSS-Delta] 账户 %s 已中止，跳过同步: %s\n", addr, reason)
+			continue
+		}
 		hexAddr, _ := hex.DecodeString(addr)
 		enc := st.Get(hexAddr)
 		if enc == nil {
@@ -262,6 +284,30 @@ func (p *Pbft) mvssTriggerSyncIfNeeded(block *core.Block, st *trie.Trie) {
 		account.BalanceBeforeOutLock.Unlock()
 		mpNew := &core.ProofDB{}
 		_ = st.Prove(hexAddr, 0, mpNew)
+		if params.IsMVSSDelta() {
+			deltaBalance := new(big.Int).Sub(stateNew.Balance, stateOld.Balance)
+			deltaNonce := int64(stateNew.Nonce) - int64(ctx.LastCN)
+			if deltaNonce < 0 {
+				mvssAbortDelta(addr, "delta nonce 为负")
+				continue
+			}
+			delta := &core.TXsyncDelta{
+				Address:      addr,
+				FromShard:    params.Config.ShardID,
+				DeltaBalance: deltaBalance,
+				DeltaNonce:   deltaNonce,
+				StartN:       ctx.LastCN,
+				EndN:         stateNew.Nonce,
+				PrevHash:     append([]byte(nil), ctx.LastDeltaHash...),
+				RequestTime:  time.Now().UnixMilli(),
+				Ack:          false,
+			}
+			delta.DeltaHash = delta.CalcDeltaHash()
+			ctx.LastDeltaHash = append([]byte(nil), delta.DeltaHash...)
+			ctx.FSM = account.MigFSMSyncOut
+			p.TrySendTXsyncDelta([]*core.TXsyncDelta{delta}, ctx.TargetShard)
+			continue
+		}
 		sync := &core.TXsync{
 			Address:     addr,
 			FromShard:   params.Config.ShardID,
@@ -280,4 +326,6 @@ func (p *Pbft) mvssTriggerSyncIfNeeded(block *core.Block, st *trie.Trie) {
 // mvssOnAnnounceDone 迁移完成后清理上下文。
 func mvssOnAnnounceDone(addr string) {
 	account.DeleteMigCtx(addr)
+	account.DeleteMigPendingDelta(addr)
+	account.ClearMigAbort(addr)
 }
