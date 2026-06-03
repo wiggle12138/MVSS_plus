@@ -1,6 +1,7 @@
 package account
 
 import (
+	"blockEmulator/params"
 	"math/big"
 	"sync"
 )
@@ -10,10 +11,14 @@ const (
 	MigFSMActive = iota
 	MigFSMPauseOld
 	MigFSMSyncOut
+	MigFSMWaitSyncIni // 目标片：等待源片 TXsync（State_ini）
+	MigFSMSyncApplied // 目标片：已 apply State_ini，可执行 new
+	MigFSMAckSent     // 目标片：new 上链后已回传 Stateʲ
 )
 
 // MigAccountCtx 单账户迁移上下文（仅 MVSS+ 使用）。
 type MigAccountCtx struct {
+	SourceShard   int // 迁出分片编号（回传 ack 用）
 	TargetShard   int
 	Mig1Time      int64
 	LastCN        uint64
@@ -22,9 +27,12 @@ type MigAccountCtx struct {
 	NextNonce     uint64 // 下一笔待分配 nonce
 	OrderList     map[int]int64 // txId -> ClientTimestamp
 	ArrivalList   map[int]int64 // txId -> RequestTime（到达时间，判 old/new）
-	PausedTxIDs   map[int]bool
-	FSM           int
-	LastDeltaHash []byte
+	CommittedTx   map[int]bool  // 本片已 commit 的 txId
+	FirstNewTxID  int           // 交错检测到的中间 new 交易
+	PausedTxIDs    map[int]bool
+	FSM            int
+	PendingSyncAck bool // 目标片 new 已执行，待块后回传 ack
+	LastDeltaHash  []byte
 }
 
 var (
@@ -117,6 +125,7 @@ func DetectInterleave(ctx *MigAccountCtx) bool {
 		newMid := IsTXNew(ctx.Mig1Time, ctx.arrivalTime(items[i+1].id))
 		old2 := !IsTXNew(ctx.Mig1Time, ctx.arrivalTime(items[i+2].id))
 		if old1 && newMid && old2 {
+			ctx.FirstNewTxID = items[i+1].id
 			for k := i + 2; k < len(items); k++ {
 				if !IsTXNew(ctx.Mig1Time, ctx.arrivalTime(items[k].id)) {
 					ctx.PausedTxIDs[items[k].id] = true
@@ -135,6 +144,122 @@ func (ctx *MigAccountCtx) IsPaused(txID int) bool {
 		return false
 	}
 	return ctx.PausedTxIDs[txID]
+}
+
+// ShouldBlockNewOnTarget 目标片在 apply State_ini 前不得打包 new。
+func (ctx *MigAccountCtx) ShouldBlockNewOnTarget() bool {
+	return ctx != nil && ctx.FSM == MigFSMWaitSyncIni
+}
+
+// PrefixOldAllCommitted 逻辑序上 FirstNew 之前的 old 均已在本片 commit。
+func (ctx *MigAccountCtx) PrefixOldAllCommitted() bool {
+	if ctx == nil || ctx.FirstNewTxID <= 0 {
+		return false
+	}
+	firstTS, ok := ctx.OrderList[ctx.FirstNewTxID]
+	if !ok {
+		return false
+	}
+	for id, ts := range ctx.OrderList {
+		if IsTXNew(ctx.Mig1Time, ctx.arrivalTime(id)) {
+			continue
+		}
+		if ts < firstTS {
+			if ctx.CommittedTx == nil || !ctx.CommittedTx[id] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// PrefixOldReady 扩展判定：已标记 commit，或已不在交易池（已入块）。
+func (ctx *MigAccountCtx) PrefixOldReady(inPool func(txID int) bool) bool {
+	if ctx == nil || ctx.FirstNewTxID <= 0 {
+		return false
+	}
+	firstTS, ok := ctx.OrderList[ctx.FirstNewTxID]
+	if !ok {
+		return false
+	}
+	for id, ts := range ctx.OrderList {
+		if IsTXNew(ctx.Mig1Time, ctx.arrivalTime(id)) {
+			continue
+		}
+		if ts >= firstTS {
+			continue
+		}
+		if ctx.CommittedTx != nil && ctx.CommittedTx[id] {
+			continue
+		}
+		if inPool != nil && inPool(id) {
+			return false
+		}
+	}
+	return true
+}
+
+// MarkTxCommitted 记录交易已上链（源/目标片通用）。
+func MarkTxCommitted(addr string, txID int) {
+	MigCtxLock.Lock()
+	defer MigCtxLock.Unlock()
+	ctx, ok := MigCtx[addr]
+	if !ok || ctx == nil {
+		return
+	}
+	if ctx.CommittedTx == nil {
+		ctx.CommittedTx = make(map[int]bool)
+	}
+	ctx.CommittedTx[txID] = true
+}
+
+// ShouldSourcePackOutgoing 源片 Announce 后账户已迁出映射，仍须打包的 suffix-old / Paused 交易。
+func (ctx *MigAccountCtx) ShouldSourcePackOutgoing(txID int, clientTS, arrivalTS int64) bool {
+	if ctx == nil {
+		return false
+	}
+	selfShard := params.ShardTable[params.Config.ShardID]
+	if ctx.TargetShard == selfShard {
+		return false
+	}
+	if ctx.IsPaused(txID) {
+		return true
+	}
+	if ctx.IsSuffixOldTx(txID, clientTS, arrivalTS) {
+		return true
+	}
+	// 探针 tx3（与 core.SyncProbeIDBase 对齐）
+	const probeBase = 9_000_000_000
+	const probeStride = 10
+	if txID >= probeBase && (txID-probeBase)%probeStride == 3 {
+		return true
+	}
+	return false
+}
+
+// IsSuffixOldTx 是否为交错模式中 FirstNew 之后的 old（如探针 tx3）。
+func (ctx *MigAccountCtx) IsSuffixOldTx(txID int, clientTS, arrivalTS int64) bool {
+	if ctx == nil || ctx.FirstNewTxID <= 0 {
+		return false
+	}
+	if IsTXNew(ctx.Mig1Time, arrivalTS) {
+		return false
+	}
+	firstTS, ok := ctx.OrderList[ctx.FirstNewTxID]
+	if !ok {
+		return false
+	}
+	return txID != ctx.FirstNewTxID && clientTS >= firstTS
+}
+
+// ResumeAfterSyncAck 源片收到 Stateʲ 后恢复打包剩余 old。
+func ResumeAfterSyncAck(ctx *MigAccountCtx) {
+	if ctx == nil {
+		return
+	}
+	ctx.PausedTxIDs = make(map[int]bool)
+	ctx.SyncNeeded = false
+	ctx.FSM = MigFSMActive
 }
 
 // 目标分片待应用的同步状态（由 TXsync 写入，出块时合并）。

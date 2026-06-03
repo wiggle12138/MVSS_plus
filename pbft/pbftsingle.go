@@ -77,6 +77,16 @@ func (p *Pbft) commit1(content []byte, pbftType string) {
 			for _, v := range block.Transactions {
 				//通过Addr2Shard函数将交易发送者和接收者的地址转换为分片ID
 				_, toid := account.Addr2Shard(hex.EncodeToString(v.Sender)), account.Addr2Shard(hex.EncodeToString(v.Recipient))
+				// 探针交易：发送方或接收方属本片即写入（Announce 后发送方映射可能已指向目标片）
+				fromid := account.Addr2Shard(hex.EncodeToString(v.Sender))
+				if core.IsSyncProbeTxID(v.Id) && (params.ShardTable[params.Config.ShardID] == fromid ||
+					params.ShardTable[params.Config.ShardID] == toid) {
+					commit_txs = append(commit_txs, v)
+					v.CommitTime = pbftend
+					s := fmt.Sprintf("%v %v %v %v %v %v %v %v %v %v %v %v %v %v %v %v %v %v %v %v", hex.EncodeToString(v.Sender), hex.EncodeToString(v.Recipient), v.Id, block.Header.Number, v.RequestTime-InitTime*1000, v.Second_RequestTime-InitTime*1000, v.TXmig1_Time-InitTime*1000, v.TXmig2_Time-InitTime*1000, v.CommitTime-v.RequestTime, v.LockTime-InitTime*1000, v.UnlockTime-InitTime*1000, v.LockTime2-InitTime*1000, v.UnlockTime2-InitTime*1000, v.Success, v.SenLock, v.RecLock, v.HalfLock, v.Sen_Suppose_on_chain, v.Rec_Suppose_on_chain, v.Relay_Lock)
+					txlog.Write(strings.Split(s, " "))
+					continue
+				}
 				//若交易接收者属于本分片才加入已上链交易集
 				if params.Config.Not_Lock_Acc_When_Migrating {
 					account.Not_Lock_Acc_Lock.Lock()
@@ -293,7 +303,7 @@ func (p *Pbft) commit1(content []byte, pbftType string) {
 					go p.TryTXmig1(block.TXmig1s, outbalance, st3, migTree)
 				}
 				if params.IsMVSSPlus() {
-					p.mvssTriggerSyncIfNeeded(block, st3)
+					p.mvssOnBlockCommitted(block, st3)
 				}
 				// 通知各分片，账户已在本分片
 				if len(block.TXmig2s) != 0 {

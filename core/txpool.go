@@ -168,39 +168,78 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 	config := params.Config
 	fmt.Printf("left_count: %v\n", left_count)
 	tx_cnt := left_count
-	loc := -1
 	pool.Lock.Lock()
 	if len(pool.Queue) < left_count {
 		tx_cnt = len(pool.Queue)
 	}
-	txs = make([]*Transaction, 0)
-	// txs = append(txs, pool.Queue[0:tx_cnt]...)
-	for k, v := range pool.Queue {
-		if tx_cnt == 0 {
-			break
+	txs = make([]*Transaction, 0, tx_cnt)
+	rest := make([]*Transaction, 0, len(pool.Queue))
+	packedN := 0
+	mvssTargetMayPackNew := func(from string, v *Transaction) bool {
+		if !params.IsMVSS() || params.IsMVSSDelta() {
+			return false
 		}
-		loc = k
+		selfShard := params.ShardTable[params.Config.ShardID]
+		ctx, ok := account.GetMigCtx(from)
+		return ok && ctx != nil && ctx.TargetShard == selfShard && !ctx.ShouldBlockNewOnTarget() &&
+			account.IsTXNew(ctx.Mig1Time, v.RequestTime)
+	}
+	for _, v := range pool.Queue {
+		if packedN >= tx_cnt {
+			rest = append(rest, v)
+			continue
+		}
 
 		from, to := hex.EncodeToString(v.Sender), hex.EncodeToString(v.Recipient)
 		// 不是自己分片的交易,直接不管了
 		account.Account2ShardLock.Lock()
-		if (!account.AccountInOwnShard[from] && !v.IsRelay && !v.Relay_Lock) || (!account.AccountInOwnShard[to] && (v.IsRelay || v.Relay_Lock)) {
-			account.Account2ShardLock.Unlock()
+		senderOwn := account.AccountInOwnShard[from]
+		recvOwn := account.AccountInOwnShard[to]
+		account.Account2ShardLock.Unlock()
+		if !senderOwn && !v.IsRelay && !v.Relay_Lock {
+			if !(params.IsMVSS() && !params.IsMVSSDelta()) {
+				rest = append(rest, v)
+				continue
+			}
+			ctx, ok := account.GetMigCtx(from)
+			if !ok || ctx == nil || !ctx.ShouldSourcePackOutgoing(v.Id, v.OrderTimestamp(), v.RequestTime) {
+				rest = append(rest, v)
+				continue
+			}
+		}
+		if !recvOwn && (v.IsRelay || v.Relay_Lock) {
+			rest = append(rest, v)
 			continue
 		}
-		account.Account2ShardLock.Unlock()
+
+		// MVSS Stage3：目标片 apply State_ini 前不得打包迁户 new
+		if params.IsMVSS() && !params.IsMVSSDelta() {
+			selfShard := params.ShardTable[params.Config.ShardID]
+			if ctx, ok := account.GetMigCtx(from); ok && ctx.TargetShard == selfShard &&
+				ctx.ShouldBlockNewOnTarget() && account.IsTXNew(ctx.Mig1Time, v.RequestTime) {
+				rest = append(rest, v)
+				continue
+			}
+			// 源片：suffix old（交错后 Pause）在 ack 前不得打包
+			if ctx, ok := account.GetMigCtx(from); ok && ctx != nil && ctx.TargetShard != selfShard && ctx.IsPaused(v.Id) {
+				rest = append(rest, v)
+				continue
+			}
+		}
 
 		//如果是锁机制，所有涉及到的交易都会被锁住。即便被锁的是收钱的账户，也不会先执行扣钱部分
 		// MVSS+：老交易继续打包，新交易重定向，暂停被 FSM 挂起的老交易
 		if params.IsMVSSPlus() && config.Not_Lock_Acc_When_Migrating {
 			account.Not_Lock_Acc_Lock.Lock()
 			if account.Not_Lock_Acc[from] {
-				if account.IsTXNew(v.TXmig1_Time, v.RequestTime) {
+				if account.IsTXNew(v.TXmig1_Time, v.RequestTime) && !mvssTargetMayPackNew(from, v) {
 					account.Not_Lock_Acc_Lock.Unlock()
+					rest = append(rest, v)
 					continue
 				}
 				if ctx, ok := account.GetMigCtx(from); ok && ctx.IsPaused(v.Id) {
 					account.Not_Lock_Acc_Lock.Unlock()
+					rest = append(rest, v)
 					continue
 				}
 			} else if account.Not_Lock_Acc[to] {
@@ -208,8 +247,9 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 				if reqT <= 0 {
 					reqT = v.RequestTime
 				}
-				if account.IsTXNew(v.TXmig1_Time, reqT) {
+				if account.IsTXNew(v.TXmig1_Time, reqT) && !mvssTargetMayPackNew(to, v) {
 					account.Not_Lock_Acc_Lock.Unlock()
+					rest = append(rest, v)
 					continue
 				}
 			}
@@ -336,13 +376,29 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 		}
 
 		txs = append(txs, v)
-		tx_cnt--
+		// MVSS Stage3：打包时标记 prefix old 已选中，便于块提交后触发 sync
+		if params.IsMVSS() && !params.IsMVSSDelta() {
+			selfShard := params.ShardTable[params.Config.ShardID]
+			if ctx, ok := account.GetMigCtx(from); ok && ctx != nil && ctx.TargetShard != selfShard {
+				account.MarkTxCommitted(from, v.Id)
+			}
+		}
+		packedN++
 	}
-	pool.Queue = pool.Queue[loc+1:]
+	pool.Queue = rest
 	queueLen = len(pool.Queue)
 
 	pool.Lock.Unlock()
 	return
+}
+
+func (pool *Tx_pool) ContainsTxID(id int) bool {
+	for _, tx := range pool.Queue {
+		if tx.Id == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (pool *Tx_pool) LockTX() {

@@ -203,8 +203,21 @@ func (p *Pbft) handleAnns(anns []*core.TXann, st *trie.Trie, migTree *trie.Trie)
 		for _, caps := range cAps {
 			for addr, cAp := range caps {
 				account.Not_Lock_Acc_Lock.Lock()
-				cAp.PendingTxs = append(cAp.PendingTxs, p.Node.CurChain.Tx_pool.Not_Locking_TX_Pools[addr]...)
-				delete(p.Node.CurChain.Tx_pool.Not_Locking_TX_Pools, addr)
+				side := p.Node.CurChain.Tx_pool.Not_Locking_TX_Pools[addr]
+				var keep []*core.Transaction
+				for _, tx := range side {
+					sender := hex.EncodeToString(tx.Sender)
+					if mvssShouldKeepTxOnSourceDuringAnnounce(sender, tx) {
+						keep = append(keep, tx)
+					} else {
+						cAp.PendingTxs = append(cAp.PendingTxs, tx)
+					}
+				}
+				if len(keep) > 0 {
+					p.Node.CurChain.Tx_pool.Not_Locking_TX_Pools[addr] = keep
+				} else {
+					delete(p.Node.CurChain.Tx_pool.Not_Locking_TX_Pools, addr)
+				}
 				account.Not_Lock_Acc_Lock.Unlock()
 			}
 		}
@@ -247,9 +260,15 @@ func (p *Pbft) handleAnns(anns []*core.TXann, st *trie.Trie, migTree *trie.Trie)
 
 	j := 0
 	for _, tx := range p.Node.CurChain.Tx_pool.Queue {
+		senderHex := hex.EncodeToString(tx.Sender)
 		// 如果sender是要出去的账户，且不是relaytx, 则收集
-		if shard, ok := isdelete[hex.EncodeToString(tx.Sender)]; ok && !tx.IsRelay && !tx.Relay_Lock {
-			cAps[shard][hex.EncodeToString(tx.Sender)].PendingTxs = append(cAps[shard][hex.EncodeToString(tx.Sender)].PendingTxs, tx)
+		if shard, ok := isdelete[senderHex]; ok && !tx.IsRelay && !tx.Relay_Lock {
+			if mvssShouldKeepTxOnSourceDuringAnnounce(senderHex, tx) {
+				p.Node.CurChain.Tx_pool.Queue[j] = tx
+				j++
+				continue
+			}
+			cAps[shard][senderHex].PendingTxs = append(cAps[shard][senderHex].PendingTxs, tx)
 			continue
 		}
 

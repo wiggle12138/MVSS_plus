@@ -24,7 +24,12 @@ var (
 	testFile       string
 	isClient       bool
 	maxInjectTxs       int // 0 = unlimited; client only: cap loaded/injected txs for smoke tests
-	migrationStrategy  string
+	injectStartTx      int // 0-based offset; client only
+	migrationStrategy   string
+	enableSyncProbe     bool
+	syncProbeMaxAccounts int
+	syncProbeDelayMs    int
+	syncProbeAccount    string
 	// requestlog    *csv.Writer
 	EndTime int64
 )
@@ -51,7 +56,12 @@ func Test_shard() {
 	flag.StringVarP(&testFile, "testFile", "t", "", "path of the input test file")
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
 	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
+	flag.IntVar(&injectStartTx, "injectStartTx", 0, "client only: start injecting from this 0-based tx offset.")
 	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration: original|MVSS|MVSS-Delta|SOTA-Lock|Fine-tuned-Lock|stop_epoch (aliases: lock, finetuned, MVSS+; empty=config default)")
+	flag.BoolVar(&enableSyncProbe, "enableSyncProbe", false, "client only: inject MVSS sync probe txs on migration (MVSS/MVSS-Delta)")
+	flag.IntVar(&syncProbeMaxAccounts, "syncProbeMaxAccounts", 0, "client only: max outgoing accounts per migration probe round (0=config default 3)")
+	flag.IntVar(&syncProbeDelayMs, "syncProbeDelayMs", 0, "client only: PhaseB delay ms after NewMap (0=config: 2*Block_interval)")
+	flag.StringVar(&syncProbeAccount, "syncProbeAccount", "", "client only: force probe on this hex addr if it migrates out")
 
 	flag.Parse() //解析命令行参数
 
@@ -77,7 +87,26 @@ func Test_shard() {
 		if maxInjectTxs > 0 {
 			config.MaxInjectTxs = maxInjectTxs
 		}
+		if injectStartTx > 0 {
+			config.InjectStartTx = injectStartTx
+		}
+		if enableSyncProbe {
+			config.EnableSyncProbe = true
+		}
+		if syncProbeMaxAccounts > 0 {
+			config.SyncProbeMaxAccounts = syncProbeMaxAccounts
+		}
+		if syncProbeDelayMs > 0 {
+			config.SyncProbeDelayMs = syncProbeDelayMs
+		}
+		if syncProbeAccount != "" {
+			config.SyncProbeAccount = syncProbeAccount
+		}
 		applyMigrationConfig(config)
+		if config.EnableSyncProbe {
+			fmt.Printf("SyncProbe enabled maxAccounts=%d delayMs=%d account=%q (MVSS=%v)\n",
+				config.SyncProbeMaxAccounts, config.SyncProbeDelayMs, config.SyncProbeAccount, params.IsMVSS())
+		}
 		pbft.RunClient(testFile)
 		return
 	}

@@ -20,6 +20,8 @@ type ChainConfig struct {
 	Inject_speed            int // tx count per second
 	// MaxInjectTxs 仅客户端加载/注入前 N 笔交易；0 表示不限制（全量如 300K）。用于联调、看块是否含交易。
 	MaxInjectTxs int
+	// InjectStartTx 仅客户端生效：从第几笔交易开始注入（0-based 下标）。
+	InjectStartTx int
 	Max_Commit              int // 确认多少个交易后就迁移
 	Max_Commit_Block        int // 确认多少个区块后就迁移，要×分片数量
 	ClientSendTX            bool
@@ -47,6 +49,14 @@ type ChainConfig struct {
 	OnlyOnce                 int    //1只迁移1次，否则设为1000000
 	Not_Lock_immediately     bool
 	RelayLock                bool
+
+	// Sync 探针（仅 client + MVSS/MVSS-Delta；见 说明文档/Sync探针注入.md）
+	EnableSyncProbe      bool   // 是否在 runMigrationFromPending 注入交错探针交易
+	SyncProbeMaxAccounts int    // 每轮迁移最多探针账户数，0 表示用默认 3
+	SyncProbeDelayMs        int    // 已废弃，保留兼容；请用 SyncProbePhaseBDelayMs
+	SyncProbeSettleMs       int    // Phase A 发送后、NewMap 前的等待（毫秒），0=800
+	SyncProbePhaseBDelayMs  int    // NewMap 后触发 Phase B（毫秒），0=3*Block_interval 秒
+	SyncProbeAccount        string // 非空则仅对该迁出地址探针（须在迁出列表中）
 }
 
 var (
@@ -408,10 +418,11 @@ var (
 		MaxRelayBlockSize:       10,
 		MinRelayBlockSize:       1,
 		Inject_speed:            400,
-		MaxInjectTxs:            12000,
+		MaxInjectTxs:            20000,
+		InjectStartTx:           0,
 		Relay_interval:          1000,
 		Max_Commit:              50000,
-		Max_Commit_Block:        10,
+		Max_Commit_Block:        20,
 		ClientSendTX:            true,
 		MigrationStrategy:       StrategyOriginal,
 		Bu_Tong_Bi_Li:            false,
@@ -428,6 +439,12 @@ var (
 		OnlyOnce:                 100,
 		Not_Lock_immediately:     true,
 		RelayLock:                false,
+		EnableSyncProbe:          false,
+		SyncProbeMaxAccounts:     3,
+		SyncProbeDelayMs:         0,
+		SyncProbeSettleMs:        0,
+		SyncProbePhaseBDelayMs:   0,
+		SyncProbeAccount:         "",
 	}
 
 	Init_addrs = []string{

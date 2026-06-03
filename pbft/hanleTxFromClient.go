@@ -35,18 +35,37 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 		senderStr := hex.EncodeToString(tx.Sender)
 		senderSID := account.Addr2Shard(senderStr)
 		recSID := account.Addr2Shard(hex.EncodeToString(tx.Recipient))
+		probe := isSyncProbeTxID(tx.Id)
 		localTx := senderSID == self_shardID ||
 			(params.IsMVSSPlus() && recSID == self_shardID && len(tx.RedirectTag) > 0)
+		// 目标片：已重定向的新 tx（sender 为迁入账户）
+		if !localTx && params.IsMVSSPlus() && len(tx.RedirectTag) > 0 {
+			if ctx, ok := account.GetMigCtx(senderStr); ok && ctx.TargetShard == self_shardID {
+				localTx = true
+			}
+		}
+		if probe {
+			fmt.Printf("[SyncProbe][Ingress] shard=%s node=%s tx=%d senderSID=%d recSID=%d local=%v tag=%d isRelay=%v\n",
+				params.Config.ShardID, p.Node.nodeID, tx.Id, senderSID, recSID, localTx, len(tx.RedirectTag), tx.IsRelay)
+		}
 		item := localItem{tx: tx, localTx: localTx}
 		if localTx && params.IsMVSSPlus() {
 			if recSID == self_shardID && len(tx.RedirectTag) > 0 {
 				tx.Second_RequestTime = time.Now().UnixMilli()
 			}
 			if !mvssValidateIncomingTx(tx) {
+				if probe {
+					fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 校验失败丢弃: tag=%d nonce=%d req=%d secondReq=%d\n",
+						params.Config.ShardID, tx.Id, len(tx.RedirectTag), tx.Nonce, tx.RequestTime, tx.Second_RequestTime)
+				}
 				continue
 			}
+			mvssNormalizeTargetNewTx(tx, self_shardID)
 			if p.mvssRedirectNewTx(tx) {
 				item.redirect = true
+				if probe {
+					fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 已重定向，源片不入池\n", params.Config.ShardID, tx.Id)
+				}
 			}
 		}
 		pending = append(pending, item)
@@ -58,6 +77,9 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 		for _, item := range pending {
 			if !item.localTx {
 				tx2 = append(tx2, item.tx)
+				if isSyncProbeTxID(item.tx.Id) {
+					fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 非本片，走 TrySendTX\n", params.Config.ShardID, item.tx.Id)
+				}
 				continue
 			}
 			if item.redirect {
@@ -112,6 +134,9 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 				account.Outing_Acc_Before_Announce_Lock.Unlock()
 			}
 			txsFromClient.Txs[j] = tx
+			if isSyncProbeTxID(tx.Id) {
+				fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 本片入池(延迟锁路径)\n", params.Config.ShardID, tx.Id)
+			}
 			j++
 		}
 	}
@@ -120,18 +145,47 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 		for _, item := range pending {
 			if !item.localTx {
 				tx2 = append(tx2, item.tx)
+				if isSyncProbeTxID(item.tx.Id) {
+					fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 非本片，走 TrySendTX\n", params.Config.ShardID, item.tx.Id)
+				}
 				continue
 			}
 			if item.redirect {
 				continue
 			}
 			txsFromClient.Txs[j] = item.tx
+			if isSyncProbeTxID(item.tx.Id) {
+				fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 本片入池(立即入池路径)\n", params.Config.ShardID, item.tx.Id)
+			}
 			j++
 		}
 	}
 
 	txsFromClient.Txs = txsFromClient.Txs[:j]
-	p.Node.CurChain.Tx_pool.Queue = append(p.Node.CurChain.Tx_pool.Queue, txsFromClient.Txs...)
+	// 探针：tx1 插队首便于 prefix-old 先打包；tx3 接在队尾（仍早于 PhaseB 的 tx2，但不与 tx1 同批抢块）
+	var probe1Head, probe3Tail, normalTail []*core.Transaction
+	for _, tx := range txsFromClient.Txs {
+		if isSyncProbeTxID(tx.Id) {
+			slot := (tx.Id - core.SyncProbeIDBase) % core.SyncProbeIDStride
+			if slot == 1 {
+				probe1Head = append(probe1Head, tx)
+			} else if slot == 3 {
+				probe3Tail = append(probe3Tail, tx)
+			} else {
+				probe1Head = append(probe1Head, tx)
+			}
+		} else {
+			normalTail = append(normalTail, tx)
+		}
+	}
+	if len(probe1Head) > 0 {
+		p.Node.CurChain.Tx_pool.Queue = append(probe1Head, p.Node.CurChain.Tx_pool.Queue...)
+	}
+	if len(probe3Tail) > 0 || len(normalTail) > 0 {
+		p.Node.CurChain.Tx_pool.Queue = append(p.Node.CurChain.Tx_pool.Queue, append(probe3Tail, normalTail...)...)
+	} else if len(probe1Head) == 0 {
+		p.Node.CurChain.Tx_pool.Queue = append(p.Node.CurChain.Tx_pool.Queue, normalTail...)
+	}
 
 	if len(tx2) != 0 {
 		p.TrySendTX(tx2)

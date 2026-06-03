@@ -9,6 +9,7 @@ import (
 	"blockEmulator/utils"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/csv"
 	"encoding/gob"
 	"encoding/hex"
@@ -1389,7 +1390,12 @@ func (p *Pbft) handleMig2(content []byte) {
 				continue
 			}
 			m1 := m2.Txmig1
+			fsm := account.MigFSMActive
+			if m1.Sync && params.IsMVSS() && !params.IsMVSSDelta() {
+				fsm = account.MigFSMWaitSyncIni
+			}
 			account.SetMigCtx(m1.Address, &account.MigAccountCtx{
+				SourceShard:   m1.FromshardID,
 				TargetShard:   params.ShardTable[params.Config.ShardID],
 				Mig1Time:      m1.Request_Time,
 				LastCN:        m1.LastCN,
@@ -1397,8 +1403,10 @@ func (p *Pbft) handleMig2(content []byte) {
 				MigNonce:      m1.LastCN,
 				NextNonce:     m1.LastCN,
 				OrderList:     m1.OrderList,
+				ArrivalList:   nil,
+				CommittedTx:   make(map[int]bool),
 				PausedTxIDs:   make(map[int]bool),
-				FSM:           account.MigFSMActive,
+				FSM:           fsm,
 				LastDeltaHash: nil,
 			})
 		}
@@ -1851,8 +1859,22 @@ func (p *Pbft) handleEpochChange() {
 	p.mpropose(new)
 }
 
+var (
+	lastNewMapHash [32]byte
+	newMapDedupMu  sync.Mutex
+)
+
 // 处理接收到的客户端发送的新映射信息
 func (p *Pbft) handleNewMap(content []byte) {
+	newMapDedupMu.Lock()
+	sum := sha256.Sum256(content)
+	if lastNewMapHash == sum {
+		newMapDedupMu.Unlock()
+		fmt.Printf("本节点忽略重复的 newMap（%s）\n", params.Config.ShardID)
+		return
+	}
+	lastNewMapHash = sum
+	newMapDedupMu.Unlock()
 
 	nam := NaM{}
 	//type NaM struct {

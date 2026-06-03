@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"blockEmulator/account"
@@ -53,6 +54,7 @@ type BlockChain struct {
 	Storage *storage.Storage
 	db      ethdb.Database // the leveldb database to store in the disk, for status trie
 	Triedb  *trie.Database // the trie database which helps to store the status trie
+	stateMu sync.Mutex     // 保护 Triedb：AddBlock 与 ApplyMVSSAccountState 不得并发
 
 	// StatusTrie *trie.Trie
 
@@ -397,6 +399,10 @@ func (bc *BlockChain) GenerateBlock(id int) *core.Block {
 
 // 输出更新后的状态树 以及 要迁出的账户的余额
 func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.Transaction, mig1s []*core.TXmig1, mig2s []*core.TXmig2, anns []*core.TXann, nss []*core.TXns) ([]byte, map[string]*big.Int) {
+	if commit == 1 {
+		bc.stateMu.Lock()
+		defer bc.stateMu.Unlock()
+	}
 	// build trie from the triedb (in disk)
 	start_execute := time.Now().UnixMicro()
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.Triedb)
@@ -451,7 +457,15 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 	for _, tx := range txs {
 		// 确保发送地址属于此分片，即此交易不是其它分片发来的relay交易
 		// if account.Addr2Shard(hex.EncodeToString(tx.Sender)) == params.ShardTable[bc.ChainConfig.ShardID] {
-		if !tx.IsRelay && !tx.Relay_Lock {
+		// 目标片迁户 new（含重定向探针）：须走 sender 分支扣款与 nonce，不能因 IsRelay 跳过。
+		fromAddr := hex.EncodeToString(tx.Sender)
+		runSender := !tx.IsRelay && !tx.Relay_Lock
+		if params.IsMVSS() && !params.IsMVSSDelta() && len(tx.RedirectTag) > 0 {
+			if ctx, ok := account.GetMigCtx(fromAddr); ok && ctx.TargetShard == params.ShardTable[bc.ChainConfig.ShardID] {
+				runSender = true
+			}
+		}
+		if runSender {
 			s_state_enc := st.Get(tx.Sender)
 			if s_state_enc == nil {
 				fmt.Printf("sender属于该分片吗：%v\n", account.AccountInOwnShard[hex.EncodeToString(tx.Sender)])
@@ -465,9 +479,20 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 			// MVSS：nonce 校验防双花，通过后递增
 			if params.IsMVSS() {
 				if tx.Nonce != account_state.Nonce {
+					if core.IsSyncProbeTxID(tx.Id) {
+						fmt.Printf("[SyncProbe][Exec] shard=%s tx=%d nonce 不匹配 expect=%d got=%d，跳过执行\n",
+							params.ShardTable[bc.ChainConfig.ShardID], tx.Id, account_state.Nonce, tx.Nonce)
+					}
 					continue
 				}
 				account_state.Nonce++
+				if ctx, ok := account.GetMigCtx(fromAddr); ok && ctx != nil &&
+					ctx.TargetShard == params.ShardTable[bc.ChainConfig.ShardID] &&
+					account.IsTXNew(ctx.Mig1Time, tx.RequestTime) {
+					account.MigCtxLock.Lock()
+					ctx.PendingSyncAck = true
+					account.MigCtxLock.Unlock()
+				}
 			}
 			account_state.Balance.Sub(account_state.Balance, tx.Value)
 			st.Update(tx.Sender, account_state.Encode())
@@ -728,6 +753,37 @@ func (bc *BlockChain) genesisStateTree(stateroot []byte) []byte {
 		log.Panic(err)
 	}
 	return rt.Bytes()
+}
+
+// ApplyMVSSAccountState 将同步状态写入本片状态树（Stage 3 跨消息即时落盘）。
+func (bc *BlockChain) ApplyMVSSAccountState(addr string, state *account.AccountState) {
+	if state == nil {
+		return
+	}
+	bc.stateMu.Lock()
+	defer bc.stateMu.Unlock()
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.Triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	hexAddr, err := hex.DecodeString(addr)
+	if err != nil {
+		log.Panic(err)
+	}
+	st.Update(hexAddr, state.Encode())
+	rt, ns := st.Commit(false)
+	if ns == nil {
+		return
+	}
+	if err = bc.Triedb.Update(trie.NewWithNodeSet(ns)); err != nil {
+		log.Panic(err)
+	}
+	if err = bc.Triedb.Commit(rt, false); err != nil {
+		log.Panic(err)
+	}
+	if bc.CurrentBlock != nil {
+		bc.CurrentBlock.Header.StateRoot = rt.Bytes()
+	}
 }
 
 // Get the transaction root, this root can be used to check the transactions

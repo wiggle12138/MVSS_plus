@@ -101,9 +101,21 @@ func RunClient(path string) {
 	txs := []*core.Transaction{}
 	if params.Config.ClientSendTX {
 		txs = Get_Initial_Map_And_TXS(path, account.Account2Shard)
-		if params.Config.MaxInjectTxs > 0 && len(txs) > params.Config.MaxInjectTxs {
-			txs = txs[:params.Config.MaxInjectTxs]
-			fmt.Printf("[RunClient] MaxInjectTxs=%d，已截断为前 %d 笔交易\n", params.Config.MaxInjectTxs, len(txs))
+		start := params.Config.InjectStartTx
+		if start < 0 {
+			start = 0
+		}
+		if start > len(txs) {
+			start = len(txs)
+		}
+		end := len(txs)
+		if params.Config.MaxInjectTxs > 0 && start+params.Config.MaxInjectTxs < end {
+			end = start + params.Config.MaxInjectTxs
+		}
+		if start > 0 || params.Config.MaxInjectTxs > 0 {
+			txs = txs[start:end]
+			fmt.Printf("[RunClient] InjectStartTx=%d MaxInjectTxs=%d，实际注入区间=[%d,%d)，共 %d 笔交易\n",
+				params.Config.InjectStartTx, params.Config.MaxInjectTxs, start, end, len(txs))
 		}
 		new_addr2shard := map[string]int{}
 		new_addrs := []string{}
@@ -496,7 +508,8 @@ func handle(data []byte) {
 		if err != nil {
 			log.Panic(err)
 		}
-		fmt.Printf("client已接收到分片%v发来通知 \n", announce.ShardID)
+		fmt.Printf("client已接收到分片%v发来cAnnounce通知 \n", announce.ShardID)
+		TrySyncProbePhaseBOnAnnounce(announce.ShardID)
 		sendtxlock.Lock()
 		account.Account2ShardLock.Lock()
 		for _, v := range announce.TXanns {
@@ -668,7 +681,15 @@ func runMigrationFromPending(tx_set []*core.Transaction) {
 	num_of_unfinished_migrated_TXs_lock.Unlock()
 	num_of_unfinished_migration_lock.Unlock()
 
+	var syncProbeTargets []syncProbeTarget
+	if syncProbeEnabled() {
+		syncProbeTargets = runSyncProbeBeforeMigration(new_addrs, new_addr2shard)
+	}
+
 	SendNewAddr2Shard(new_addrs, new_addr2shard)
+	if len(syncProbeTargets) > 0 {
+		ArmSyncProbePhaseB(syncProbeTargets)
+	}
 	s := fmt.Sprintf("%v %v", algorithmend-StartTime, algorithmend-algorithmbegin)
 	migrationlog.Write(strings.Split(s, " "))
 	migrationlog.Flush()
@@ -962,7 +983,7 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 	}
 	if path == "selectedTxs_300K.csv" || is300KStyleDatasetPath(path) {
 		dataset_flag = 2
-		fmt.Printf("300K 格式文件 %s\n", path)
+		fmt.Printf("MVSS测试格式文件 %s\n", path)
 	}
 
 	file, err := os.Open(path)
@@ -1040,6 +1061,9 @@ func Get_Initial_Map_And_TXS(path string, Account2Shard map[string]int) []*core.
 				continue
 			}
 			clientTS = parseClientTimestamp(row)
+			if((clientTS>0) && (i==3)){
+				fmt.Printf("有时间戳\n")
+			}
 		} else {
 			// 普通格式处理
 			if len(row) < 3 {

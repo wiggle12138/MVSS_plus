@@ -12,6 +12,7 @@ REM   start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
 REM   start_2shard_2node.bat selectedTxs_300K.csv SOTA-Lock
 REM   start_2shard_2node.bat selectedTxs_300K.csv Fine-tuned-Lock
 REM   (aliases: MVSS+, lock, finetuned)
+REM Sync probe (MVSS sync path test): set SYNC_PROBE=1 before running this bat.
 REM Slow cold build: set NODE_WAIT_SEC=60 before running this bat.
 
 pushd "%~dp0"
@@ -42,6 +43,8 @@ echo ============================================
 echo.
 
 set "M_FLAG=-m %MIGRATION_STRATEGY%"
+set "PROBE_FLAG="
+if "%SYNC_PROBE%"=="1" set "PROBE_FLAG=--enableSyncProbe"
 
 start "MVSS S0-N0" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N0 -t ""%TEST_FILE%"" %M_FLAG%"
 start "MVSS S0-N1" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N1 -t ""%TEST_FILE%"" %M_FLAG%"
@@ -51,7 +54,7 @@ start "MVSS S1-N1" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S1
 echo Started 4 node windows. Waiting %NODE_WAIT_SEC%s for 8010/8011/8020/8021 to listen...
 timeout /t %NODE_WAIT_SEC% /nobreak >nul
 
-start "MVSS CLIENT" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -f %MALICIOUS_NUM% -c -t ""%TEST_FILE%"" %M_FLAG%"
+start "MVSS CLIENT" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -f %MALICIOUS_NUM% -c -t ""%TEST_FILE%"" %M_FLAG% %PROBE_FLAG%"
 
 echo Started CLIENT (127.0.0.1:8800). Stop with Ctrl+C in each window.
 echo.
