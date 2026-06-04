@@ -549,7 +549,7 @@ func (p *Pbft) mvssSendSyncForAddr(addr string, ctx *account.MigAccountCtx, st *
 		account.MigCtxLock.Lock()
 		ctx.FSM = account.MigFSMSyncOut
 		account.MigCtxLock.Unlock()
-		p.TrySendTXsyncDelta([]*core.TXsyncDelta{delta}, ctx.TargetShard)
+		enqueueOutboundStateIniDelta(p, delta, ctx.TargetShard)
 		return
 	}
 	sync := &core.TXsync{
@@ -633,6 +633,11 @@ func (p *Pbft) mvssOnBlockCommitted(block *core.Block, st *trie.Trie) {
 			fmt.Printf("[MVSS+] 源片 %s 账户 %s 等待 prefix old 提交 (FirstNew=%d Committed=%v)\n",
 				params.Config.ShardID, addr, ctx.FirstNewTxID, ctx.CommittedTx)
 		}
+	}
+
+	// 源片：同块内多账户 prefix-old 就绪的 State_ini delta 合并为一条 SyncDeltaMsg 发送
+	if params.IsMVSSDelta() {
+		p.mvssFlushAllOutboundStateIniAtBlockEnd()
 	}
 }
 

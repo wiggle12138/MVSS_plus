@@ -7,10 +7,10 @@ MVSS测试格式文件 selectedTxs_300K.csv
 300K交易处理 [   0x5410c4c59a719eef345869c204ec8dcac2dfd718 0xa795b4ddbf17570f2c8f5e75a13ef94db6757f32  0 0 100094510999899995340         ]
 成功读取 299999 笔交易
 [RunClient] InjectStartTx=0 MaxInjectTxs=20000，实际注入区间=[0,20000)，共 20000 笔交易
-客户端发送初始时间：1780541947
-客户端发送初始时间：1780541947
-客户端发送初始时间：1780541947
-客户端发送初始时间：1780541947
+客户端发送初始时间：1780552188
+客户端发送初始时间：1780552188
+客户端发送初始时间：1780552188
+客户端发送初始时间：1780552188
 
 所有迁移都完成啦！
 距离下一次迁移长度：40
@@ -144,9 +144,9 @@ MVSS测试格式文件 selectedTxs_300K.csv
 所有分片都发送了pending！
 
 [SyncProbe] 本轮迁出探针账户数=3（最多 3）
-[SyncProbe] PhaseA addr=f341cafc9ba3d91ef98c9ef811170c1c5f1ef28e shard=S0 ids=9000000001,9000000003 recv=6fbcb408559d4fbf0ac8f7126ebb26fed7ccf87a RequestTime=1
-[SyncProbe] PhaseA addr=96904d8c1f1c88dfb6cfba916396bf4beabcf454 shard=S0 ids=9000000011,9000000013 recv=469242a6656511c8f2dd967e0c5c84c8e7df4904 RequestTime=1
-[SyncProbe] PhaseA addr=9e9ff119553d7ad5d40d1cd4c39aba4901955470 shard=S0 ids=9000000021,9000000023 recv=d5aa74201cfafc7d182068bd3344edb3301eca3e RequestTime=1
+[SyncProbe] PhaseA addr=f341cafc9ba3d91ef98c9ef811170c1c5f1ef28e shard=S0 ids=9000000001,9000000003 recv=7e9ccf7ac9a570597a9a7a7e4dcf801640e15c94 RequestTime=1
+[SyncProbe] PhaseA addr=96904d8c1f1c88dfb6cfba916396bf4beabcf454 shard=S0 ids=9000000011,9000000013 recv=fb77d318eddc4a1baff61f7770f10f19e35c842a RequestTime=1
+[SyncProbe] PhaseA addr=9e9ff119553d7ad5d40d1cd4c39aba4901955470 shard=S0 ids=9000000021,9000000023 recv=391bfe39ede70b9391c6b4702dd8737b902eddfc RequestTime=1
 [SyncProbe] PhaseA 已同步发送，等待入池 800ms 后再下发 NewMap
 
 次数：1  时间：45
@@ -168,9 +168,9 @@ client已接收到分片S1发来cAnnounce通知
 距离下一次迁移长度：-7
 
 [SyncProbe] 延迟到期，触发 PhaseB
-[SyncProbe] PhaseB addr=f341cafc9ba3d91ef98c9ef811170c1c5f1ef28e src=S0 dst=S1 id=9000000002 recv=0fbe81d8cb8659208a96a2cb69fece582ad0d029 RequestTime=1780541998020
-[SyncProbe] PhaseB addr=96904d8c1f1c88dfb6cfba916396bf4beabcf454 src=S0 dst=S1 id=9000000012 recv=cbabdbb54cbbc2fd81fa7c1759b7c78523289285 RequestTime=1780541998020
-[SyncProbe] PhaseB addr=9e9ff119553d7ad5d40d1cd4c39aba4901955470 src=S0 dst=S1 id=9000000022 recv=b60543b5c17b08edbfbc56630402d421658e980f RequestTime=1780541998020
+[SyncProbe] PhaseB addr=f341cafc9ba3d91ef98c9ef811170c1c5f1ef28e src=S0 dst=S1 id=9000000002 recv=346796e5eda0ccca451b711b240661aea7eaea5b RequestTime=1780552239054
+[SyncProbe] PhaseB addr=96904d8c1f1c88dfb6cfba916396bf4beabcf454 src=S0 dst=S1 id=9000000012 recv=875813b0fde177f5165177907ffd0ad9ff829d21 RequestTime=1780552239054
+[SyncProbe] PhaseB addr=9e9ff119553d7ad5d40d1cd4c39aba4901955470 src=S0 dst=S1 id=9000000022 recv=7d561d8ef1f92cf0aa1922ef869cf1a19267b6e9 RequestTime=1780552239054
 [SyncProbe] PhaseB 发送到 S0 的 tx2 数量=3
 距离下一次迁移长度：-8
 
@@ -251,7 +251,7 @@ client已接收到分片S1发来cAnnounce通知
 
 距离下一次迁移长度：-43
 
-每个活跃分片已连续 5 个空块（inject 已完成），停止系统运行。emptyStreakByShard=map[S0:5 S1:6]
+每个活跃分片已连续 5 个空块（inject 已完成），停止系统运行。emptyStreakByShard=map[S0:5 S1:5]
 客户端向分片S0的节点N0发送终止运行消息
 客户端向分片S0的节点N1发送终止运行消息
 客户端向分片S1的节点N0发送终止运行消息

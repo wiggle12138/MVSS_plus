@@ -21,7 +21,103 @@ import (
 var (
 	pendingTargetDeltaMu sync.Mutex
 	pendingTargetDelta   = map[string][]*core.TXsyncDelta{}
+
+	// 源片 State_ini delta 出站聚合：按目标分片编号索引，Ack 仍单笔直发。
+	outboundStateIniMu     sync.Mutex
+	outboundStateIniByTarget = map[int][]*core.TXsyncDelta{}
+	outboundStateIniStart  = map[int]time.Time{}
+	outboundStateIniTimer  = map[int]*time.Timer{}
 )
+
+func deltaAggregateWindow() time.Duration {
+	if params.Config == nil || params.Config.DeltaAggregateWindowMs <= 0 {
+		return 0
+	}
+	return time.Duration(params.Config.DeltaAggregateWindowMs) * time.Millisecond
+}
+
+// enqueueOutboundStateIniDelta 将 prefix-old 就绪的 State_ini delta 入队，由块末或窗口 flush。
+func enqueueOutboundStateIniDelta(p *Pbft, d *core.TXsyncDelta, targetShardID int) {
+	if p == nil || d == nil || d.Ack {
+		return
+	}
+	outboundStateIniMu.Lock()
+	for _, ex := range outboundStateIniByTarget[targetShardID] {
+		if ex != nil && ex.Address == d.Address && ex.StartN == d.StartN && ex.EndN == d.EndN {
+			outboundStateIniMu.Unlock()
+			return
+		}
+	}
+	firstInBatch := len(outboundStateIniByTarget[targetShardID]) == 0
+	if firstInBatch {
+		outboundStateIniStart[targetShardID] = time.Now()
+	}
+	outboundStateIniByTarget[targetShardID] = append(
+		outboundStateIniByTarget[targetShardID], cloneTXsyncDelta(d))
+	outboundStateIniMu.Unlock()
+
+	window := deltaAggregateWindow()
+	if window > 0 && firstInBatch {
+		tid := targetShardID
+		timer := time.AfterFunc(window, func() {
+			p.mvssFlushOutboundStateIniDeltas(tid, true)
+		})
+		outboundStateIniMu.Lock()
+		if old := outboundStateIniTimer[tid]; old != nil {
+			old.Stop()
+		}
+		outboundStateIniTimer[tid] = timer
+		outboundStateIniMu.Unlock()
+	}
+}
+
+func stopOutboundStateIniTimer(targetShardID int) {
+	if t := outboundStateIniTimer[targetShardID]; t != nil {
+		t.Stop()
+	}
+	delete(outboundStateIniTimer, targetShardID)
+}
+
+// mvssFlushOutboundStateIniDeltas 发送并清空指定目标片的出站 State_ini delta 批次。
+func (p *Pbft) mvssFlushOutboundStateIniDeltas(targetShardID int, force bool) {
+	outboundStateIniMu.Lock()
+	batch := outboundStateIniByTarget[targetShardID]
+	if len(batch) == 0 {
+		outboundStateIniMu.Unlock()
+		return
+	}
+	if !force {
+		if window := deltaAggregateWindow(); window > 0 {
+			if start, ok := outboundStateIniStart[targetShardID]; ok && time.Since(start) < window {
+				outboundStateIniMu.Unlock()
+				return
+			}
+		}
+	}
+	list := append([]*core.TXsyncDelta(nil), batch...)
+	delete(outboundStateIniByTarget, targetShardID)
+	delete(outboundStateIniStart, targetShardID)
+	stopOutboundStateIniTimer(targetShardID)
+	outboundStateIniMu.Unlock()
+
+	fmt.Printf("[MVSS-Delta] %s 聚合 flush State_ini delta → 目标片 %d，条数=%d\n",
+		params.Config.ShardID, targetShardID, len(list))
+	p.TrySendTXsyncDelta(list, targetShardID)
+}
+
+// mvssFlushAllOutboundStateIniAtBlockEnd 块提交末尾 flush；window=0 时 force 合并同块多账户。
+func (p *Pbft) mvssFlushAllOutboundStateIniAtBlockEnd() {
+	outboundStateIniMu.Lock()
+	targets := make([]int, 0, len(outboundStateIniByTarget))
+	for tid := range outboundStateIniByTarget {
+		targets = append(targets, tid)
+	}
+	outboundStateIniMu.Unlock()
+	force := deltaAggregateWindow() == 0
+	for _, tid := range targets {
+		p.mvssFlushOutboundStateIniDeltas(tid, force)
+	}
+}
 
 func cloneTXsyncDelta(d *core.TXsyncDelta) *core.TXsyncDelta {
 	if d == nil {
@@ -79,15 +175,26 @@ func (p *Pbft) TrySendTXsyncDelta(deltas []*core.TXsyncDelta, targetShardID int)
 	if err != nil {
 		log.Panic(err)
 	}
+	isAck := false
 	for _, d := range deltas {
-		if d == nil {
-			continue
+		if d != nil && d.Ack {
+			isAck = true
+			break
 		}
-		ev := "send"
-		if d.Ack {
-			ev = "ack_send"
+	}
+	if len(deltas) > 1 && !isAck {
+		writeSyncLog("send", "delta", "", 0, 0, true, fmt.Sprintf("batch=%d", len(deltas)), len(bc))
+	} else {
+		for _, d := range deltas {
+			if d == nil {
+				continue
+			}
+			ev := "send"
+			if d.Ack {
+				ev = "ack_send"
+			}
+			writeSyncLog(ev, "delta", d.Address, d.StartN, d.EndN, true, "", len(bc))
 		}
-		writeSyncLog(ev, "delta", d.Address, d.StartN, d.EndN, true, "", len(bc))
 	}
 	go utils.TcpDial(jointMessage(cTXsyncDelta, bc), leader)
 }
@@ -97,7 +204,11 @@ func (p *Pbft) handleTXsyncDelta(content []byte) {
 	if err := json.Unmarshal(content, msg); err != nil {
 		log.Panic(err)
 	}
-	writeSyncLog("recv", "delta", "", 0, 0, true, "", len(content))
+	recvReason := ""
+	if len(msg.TXsyncDeltas) > 1 {
+		recvReason = fmt.Sprintf("batch=%d", len(msg.TXsyncDeltas))
+	}
+	writeSyncLog("recv", "delta", "", 0, 0, true, recvReason, len(content))
 	fmt.Printf("[MVSS-Delta] %s 收到分片 %s 的 TXsyncDelta，条数=%d\n",
 		params.Config.ShardID, msg.ShardID, len(msg.TXsyncDeltas))
 

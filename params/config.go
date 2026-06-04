@@ -57,6 +57,11 @@ type ChainConfig struct {
 	SyncProbeSettleMs       int    // Phase A 发送后、NewMap 前的等待（毫秒），0=800
 	SyncProbePhaseBDelayMs  int    // NewMap 后触发 Phase B（毫秒），0=3*Block_interval 秒
 	SyncProbeAccount        string // 非空则仅对该迁出地址探针（须在迁出列表中）
+
+	// DeltaAggregateWindowMs 源片 State_ini delta 出站聚合窗口（毫秒）；见 说明文档/聚合窗口.md。
+	// 0=块提交末尾立即 flush（同块内多账户合并为一条 SyncDeltaMsg，不额外增延迟）；
+	// >0=自批次首条 delta 起等待该时长后再 flush（跨块聚合，可能增加 sync 延迟）。
+	DeltaAggregateWindowMs int
 }
 
 var (
@@ -445,6 +450,7 @@ var (
 		SyncProbeSettleMs:        0,
 		SyncProbePhaseBDelayMs:   0,
 		SyncProbeAccount:         "",
+		DeltaAggregateWindowMs:   0,
 	}
 
 	Init_addrs = []string{

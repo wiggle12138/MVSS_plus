@@ -104,3 +104,5 @@ benchmark 数据集
 
 33. `sync.csv` 出现 short write 非环境变量未传递（`SYNC_PROBE=1` 已生效可见 init ok），而是 `writeSyncLog` 释放锁后并发写 `csv.Writer`（`go handleTXsyncDelta` 多 goroutine）；改为持锁完成 Write+Flush，bat 显式向节点窗口注入 `SYNC_PROBE=1`。
 
+34. 源片 State_ini delta 出站聚合：`enqueueOutboundStateIniDelta` 按目标分片入队，`mvssOnBlockCommitted` 块末 flush（`DeltaAggregateWindowMs=0` 时同块多账户合并一条 `SyncDeltaMsg`）；Ack 仍单笔发送；`sync.csv` send/recv 用 `reason=batch=N` 标记。
+

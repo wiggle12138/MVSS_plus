@@ -1,6 +1,0 @@
-MigrationStrategy=MVSS-Delta (Stop=false Lock=false NotLock=true)
-&{77 N1 S0 2 0 selectedTxs_300K.csv 2 500 300 150 150 150 150 1000 10 1 400 20000 0 50000 20 true MVSS-Delta false false true false true false 3 false 8 false false false PageRank false 100 true false false 3 0 0 0 }
-节点 N1 已启动，所属分片: S0
-节点开启监听，地址：127.0.0.1:8011
-本节点已接收到客户端发送的初始时间：1780542752（锚定 InitTime=1780542752，已重置 epoch=1）
-节点收到终止节点消息，停止运行
