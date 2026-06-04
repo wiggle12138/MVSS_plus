@@ -1391,7 +1391,7 @@ func (p *Pbft) handleMig2(content []byte) {
 			}
 			m1 := m2.Txmig1
 			fsm := account.MigFSMActive
-			if m1.Sync && params.IsMVSS() && !params.IsMVSSDelta() {
+			if m1.Sync && params.IsMVSS() {
 				fsm = account.MigFSMWaitSyncIni
 			}
 			account.SetMigCtx(m1.Address, &account.MigAccountCtx{

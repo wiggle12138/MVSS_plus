@@ -23,6 +23,7 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 
 	tx2 := make([]*core.Transaction, 0)
 	self_shardID := params.ShardTable[params.Config.ShardID]
+	promoteAfterEnqueue := make(map[string]struct{})
 
 	// 先在无 Tx_pool 锁下解析分片归属，避免与 handleNewMap 抢 Account2ShardLock 死锁
 	type localItem struct {
@@ -65,6 +66,13 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 				item.redirect = true
 				if probe {
 					fmt.Printf("[SyncProbe][Ingress] shard=%s tx=%d 已重定向，源片不入池\n", params.Config.ShardID, tx.Id)
+				}
+			} else if item.localTx {
+				if ctx, ok := account.GetMigCtx(senderStr); ok && ctx != nil &&
+					ctx.TargetShard == self_shardID && account.IsTXNew(ctx.Mig1Time, tx.RequestTime) &&
+					ctx.FSM >= account.MigFSMSyncApplied {
+					// delta apply 早于 PhaseB tx2 到达时，须在入池后再次 promote 对齐 nonce
+					promoteAfterEnqueue[senderStr] = struct{}{}
 				}
 			}
 		}
@@ -194,4 +202,7 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 		params.Config.ShardID, p.Node.nodeID, len(txsFromClient.Txs), len(tx2), len(p.Node.CurChain.Tx_pool.Queue))
 
 	p.Node.CurChain.Tx_pool.Lock.Unlock()
+	for addr := range promoteAfterEnqueue {
+		p.mvssMaybePromoteAfterNewEnqueued(addr)
+	}
 }

@@ -176,7 +176,7 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 	rest := make([]*Transaction, 0, len(pool.Queue))
 	packedN := 0
 	mvssTargetMayPackNew := func(from string, v *Transaction) bool {
-		if !params.IsMVSS() || params.IsMVSSDelta() {
+		if !params.IsMVSS() {
 			return false
 		}
 		selfShard := params.ShardTable[params.Config.ShardID]
@@ -197,7 +197,7 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 		recvOwn := account.AccountInOwnShard[to]
 		account.Account2ShardLock.Unlock()
 		if !senderOwn && !v.IsRelay && !v.Relay_Lock {
-			if !(params.IsMVSS() && !params.IsMVSSDelta()) {
+			if !params.IsMVSS() {
 				rest = append(rest, v)
 				continue
 			}
@@ -212,8 +212,8 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 			continue
 		}
 
-		// MVSS Stage3：目标片 apply State_ini 前不得打包迁户 new
-		if params.IsMVSS() && !params.IsMVSSDelta() {
+		// MVSS Stage3：目标片 apply 前不得打包 new；源片 Pause 的 suffix-old 暂不出块
+		if params.IsMVSS() {
 			selfShard := params.ShardTable[params.Config.ShardID]
 			if ctx, ok := account.GetMigCtx(from); ok && ctx.TargetShard == selfShard &&
 				ctx.ShouldBlockNewOnTarget() && account.IsTXNew(ctx.Mig1Time, v.RequestTime) {
@@ -377,7 +377,7 @@ func (pool *Tx_pool) FetchTxs2Pack(left_count, blockNumber int) (txs []*Transact
 
 		txs = append(txs, v)
 		// MVSS Stage3：打包时标记 prefix old 已选中，便于块提交后触发 sync
-		if params.IsMVSS() && !params.IsMVSSDelta() {
+		if params.IsMVSS() {
 			selfShard := params.ShardTable[params.Config.ShardID]
 			if ctx, ok := account.GetMigCtx(from); ok && ctx != nil && ctx.TargetShard != selfShard {
 				account.MarkTxCommitted(from, v.Id)

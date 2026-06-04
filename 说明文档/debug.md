@@ -98,3 +98,9 @@ benchmark 数据集
 
 31. 换 benchmark 数据集后须删 `*_blockchain_db*` 与 `record/triedb/`，预期分片节点按新 CSV 重建 `Init_addrs` 与创世状态树。
 
+6.4 MVSS-Delta 探针 Stage3
+
+32. 目标片 delta apply 时探针 tx2 尚未入池，PhaseB 晚到 new 仍带源片 nonce 导致执行 skip；在 `handleTxFromClient` 入池后若 FSM≥SyncApplied 再调 `mvssPromoteMigNewTxsToHead` 按链上 nonce 重编号并提至队首。
+
+33. `sync.csv` 出现 short write 非环境变量未传递（`SYNC_PROBE=1` 已生效可见 init ok），而是 `writeSyncLog` 释放锁后并发写 `csv.Writer`（`go handleTXsyncDelta` 多 goroutine）；改为持锁完成 Write+Flush，bat 显式向节点窗口注入 `SYNC_PROBE=1`。
+

@@ -423,26 +423,22 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 			account_state.Balance.Set(v.Value)
 			account_state.Migrate = -1
 			account_state.Location = params.ShardTable[bc.ChainConfig.ShardID]
-			// MVSS：合并同步阶段带来的状态更新。
+			// MVSS：合并同步阶段带来的状态更新（全量 sync 路径；Delta 在 handleTXsyncDelta 即时落盘）。
 			if params.IsMVSS() {
 				if params.IsMVSSDelta() {
-					if d, ok := account.TakeMigPendingDelta(v.Address); ok {
-						nextBal := new(big.Int).Add(account_state.Balance, d.DeltaBalance)
-						if nextBal.Sign() < 0 || d.DeltaNonce < 0 {
-							account.MarkMigAbort(v.Address, "delta 应用后余额/nonce 非法")
-						} else {
-							account_state.Balance.Set(nextBal)
-							account_state.Nonce += uint64(d.DeltaNonce)
+					if v.Txmig1 != nil {
+						account_state.Nonce = v.Txmig1.LastCN
+					}
+				} else {
+					if pending, ok := account.TakeMigPendingState(v.Address); ok {
+						account_state.Nonce = pending.Nonce
+						if pending.Balance != nil {
+							account_state.Balance.Set(pending.Balance)
 						}
 					}
-				} else if pending, ok := account.TakeMigPendingState(v.Address); ok {
-					account_state.Nonce = pending.Nonce
-					if pending.Balance != nil {
-						account_state.Balance.Set(pending.Balance)
+					if v.Txmig1 != nil {
+						account_state.Nonce = v.Txmig1.LastCN
 					}
-				}
-				if v.Txmig1 != nil && !params.IsMVSSDelta() {
-					account_state.Nonce = v.Txmig1.LastCN
 				}
 			}
 			st.Update(hex_address, account_state.Encode())
@@ -460,7 +456,7 @@ func (bc *BlockChain) getUpdatedTreeOfState(commit int, height int, txs []*core.
 		// 目标片迁户 new（含重定向探针）：须走 sender 分支扣款与 nonce，不能因 IsRelay 跳过。
 		fromAddr := hex.EncodeToString(tx.Sender)
 		runSender := !tx.IsRelay && !tx.Relay_Lock
-		if params.IsMVSS() && !params.IsMVSSDelta() && len(tx.RedirectTag) > 0 {
+		if params.IsMVSS() && len(tx.RedirectTag) > 0 {
 			if ctx, ok := account.GetMigCtx(fromAddr); ok && ctx.TargetShard == params.ShardTable[bc.ChainConfig.ShardID] {
 				runSender = true
 			}
@@ -753,6 +749,71 @@ func (bc *BlockChain) genesisStateTree(stateroot []byte) []byte {
 		log.Panic(err)
 	}
 	return rt.Bytes()
+}
+
+// GetAccountNonce 读取状态树中账户当前 nonce（Stage3 delta 校验 StartN 用）。
+func (bc *BlockChain) GetAccountNonce(addr string) (uint64, bool) {
+	bc.stateMu.Lock()
+	defer bc.stateMu.Unlock()
+	hexAddr, err := hex.DecodeString(addr)
+	if err != nil {
+		return 0, false
+	}
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.Triedb)
+	if err != nil {
+		return 0, false
+	}
+	enc := st.Get(hexAddr)
+	if enc == nil {
+		return 0, false
+	}
+	return account.DecodeAccountState(enc).Nonce, true
+}
+
+// ApplyMVSSAccountDelta 将增量 delta 写入本片状态树（Stage3 Delta 即时落盘）。
+func (bc *BlockChain) ApplyMVSSAccountDelta(addr string, deltaBalance *big.Int, deltaNonce int64) bool {
+	if deltaBalance == nil {
+		deltaBalance = big.NewInt(0)
+	}
+	if deltaNonce < 0 {
+		return false
+	}
+	bc.stateMu.Lock()
+	defer bc.stateMu.Unlock()
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.Triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	hexAddr, err := hex.DecodeString(addr)
+	if err != nil {
+		return false
+	}
+	enc := st.Get(hexAddr)
+	if enc == nil {
+		return false
+	}
+	state := account.DecodeAccountState(enc)
+	nextBal := new(big.Int).Add(state.Balance, deltaBalance)
+	if nextBal.Sign() < 0 {
+		return false
+	}
+	state.Balance.Set(nextBal)
+	state.Nonce += uint64(deltaNonce)
+	st.Update(hexAddr, state.Encode())
+	rt, ns := st.Commit(false)
+	if ns == nil {
+		return true
+	}
+	if err = bc.Triedb.Update(trie.NewWithNodeSet(ns)); err != nil {
+		log.Panic(err)
+	}
+	if err = bc.Triedb.Commit(rt, false); err != nil {
+		log.Panic(err)
+	}
+	if bc.CurrentBlock != nil {
+		bc.CurrentBlock.Header.StateRoot = rt.Bytes()
+	}
+	return true
 }
 
 // ApplyMVSSAccountState 将同步状态写入本片状态树（Stage 3 跨消息即时落盘）。

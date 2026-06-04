@@ -105,6 +105,13 @@ func DetectInterleave(ctx *MigAccountCtx) bool {
 	if ctx == nil || len(ctx.OrderList) < 3 {
 		return false
 	}
+	// 同一轮迁移只检测一次；块后重复调用勿把 SyncOut 打回 PauseOld 以免重发 delta
+	if ctx.FirstNewTxID > 0 {
+		return false
+	}
+	if ctx.FSM >= MigFSMSyncOut {
+		return false
+	}
 	type item struct {
 		id int
 		ts int64

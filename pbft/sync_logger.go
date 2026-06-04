@@ -85,9 +85,9 @@ func writeSyncLog(event, mode, addr string, startN, endN uint64, ok bool, reason
 		shardID = params.Config.ShardID
 	}
 	synclogMu.Lock()
+	defer synclogMu.Unlock()
 	w := ensureSyncLogWriterLocked(shardID)
 	if w == nil {
-		synclogMu.Unlock()
 		return
 	}
 	okVal := "0"
@@ -108,14 +108,14 @@ func writeSyncLog(event, mode, addr string, startN, endN uint64, ok bool, reason
 	synclogCounter[shardID]++
 	cnt := synclogCounter[shardID]
 	probeMode := syncProbeModeForLog()
-	synclogMu.Unlock()
 	if err := w.Write(record); err != nil {
 		fmt.Printf("[SyncLog] write failed shard=%s node=%s event=%s mode=%s err=%v\n",
 			shardID, params.Config.NodeID, event, mode, err)
 		return
 	}
-	// 常规模式降低 flush 频率；探针模式优先保证日志完整落盘，便于核对 sync 链路。
-	if probeMode || cnt%32 == 0 || event == "abort" || event == "send" {
+	// 常规模式降低 flush 频率；探针模式及关键事件立即 flush。
+	if probeMode || cnt%32 == 0 || event == "abort" || event == "send" ||
+		event == "apply" || event == "ack_send" || event == "ack_recv" {
 		w.Flush()
 		if err := w.Error(); err != nil {
 			fmt.Printf("[SyncLog] flush failed shard=%s node=%s event=%s mode=%s err=%v\n",

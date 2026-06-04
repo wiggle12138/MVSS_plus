@@ -34,11 +34,17 @@ if not exist "%TEST_FILE%" (
     exit /b 1
 )
 
+REM log dir for this run
+for /f "delims=" %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "RUN_ID=%%I"
+set "LOG_DIR=%CD%\log\runs\run_%RUN_ID%"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+
 echo.
 echo ============================================
 echo Nodes first, then CLIENT (wait %NODE_WAIT_SEC%s for go run + listen only)
 echo Dataset: %TEST_FILE%
 echo MigrationStrategy: %MIGRATION_STRATEGY%
+echo Terminal logs: %LOG_DIR%\
 echo ============================================
 echo.
 
@@ -50,15 +56,18 @@ if "%SYNC_PROBE%"=="1" (
     set "PROBE_ENV=set SYNC_PROBE=1&& "
 )
 
-start "MVSS S0-N0" cmd /k "%PROBE_ENV%cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N0 -t ""%TEST_FILE%"" %M_FLAG%"
-start "MVSS S0-N1" cmd /k "%PROBE_ENV%cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N1 -t ""%TEST_FILE%"" %M_FLAG%"
-start "MVSS S1-N0" cmd /k "%PROBE_ENV%cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S1 -f %MALICIOUS_NUM% -n N0 -t ""%TEST_FILE%"" %M_FLAG%"
-start "MVSS S1-N1" cmd /k "%PROBE_ENV%cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -s S1 -f %MALICIOUS_NUM% -n N1 -t ""%TEST_FILE%"" %M_FLAG%"
+REM tee helper (see scripts\tee_go_run.ps1)
+set "TEE=powershell -NoProfile -ExecutionPolicy Bypass -File ""%~dp0scripts\tee_go_run.ps1"""
+
+start "MVSS S0-N0" cmd /k "%PROBE_ENV%chcp 65001 >nul && cd /d ""%CD%"" && %TEE% -LogFile ""%LOG_DIR%\S0_N0.out.log"" -WorkDir ""%CD%"" run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N0 -t ""%TEST_FILE%"" %M_FLAG%"
+start "MVSS S0-N1" cmd /k "%PROBE_ENV%chcp 65001 >nul && cd /d ""%CD%"" && %TEE% -LogFile ""%LOG_DIR%\S0_N1.out.log"" -WorkDir ""%CD%"" run main.go -S %SHARD_NUM% -s S0 -f %MALICIOUS_NUM% -n N1 -t ""%TEST_FILE%"" %M_FLAG%"
+start "MVSS S1-N0" cmd /k "%PROBE_ENV%chcp 65001 >nul && cd /d ""%CD%"" && %TEE% -LogFile ""%LOG_DIR%\S1_N0.out.log"" -WorkDir ""%CD%"" run main.go -S %SHARD_NUM% -s S1 -f %MALICIOUS_NUM% -n N0 -t ""%TEST_FILE%"" %M_FLAG%"
+start "MVSS S1-N1" cmd /k "%PROBE_ENV%chcp 65001 >nul && cd /d ""%CD%"" && %TEE% -LogFile ""%LOG_DIR%\S1_N1.out.log"" -WorkDir ""%CD%"" run main.go -S %SHARD_NUM% -s S1 -f %MALICIOUS_NUM% -n N1 -t ""%TEST_FILE%"" %M_FLAG%"
 
 echo Started 4 node windows. Waiting %NODE_WAIT_SEC%s for 8010/8011/8020/8021 to listen...
 timeout /t %NODE_WAIT_SEC% /nobreak >nul
 
-start "MVSS CLIENT" cmd /k "cd /d ""%CD%"" && go run main.go -S %SHARD_NUM% -f %MALICIOUS_NUM% -c -t ""%TEST_FILE%"" %M_FLAG% %PROBE_FLAG%"
+start "MVSS CLIENT" cmd /k "%PROBE_ENV%chcp 65001 >nul && cd /d ""%CD%"" && %TEE% -LogFile ""%LOG_DIR%\client.out.log"" -WorkDir ""%CD%"" run main.go -S %SHARD_NUM% -f %MALICIOUS_NUM% -c -t ""%TEST_FILE%"" %M_FLAG% %PROBE_FLAG%"
 
 echo Started CLIENT (127.0.0.1:8800). Stop with Ctrl+C in each window.
 echo.

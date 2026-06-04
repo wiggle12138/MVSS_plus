@@ -153,7 +153,9 @@ Pause tx3 在 NewMap 时由 `mvssProbeEarlyPauseSuffixOld` 自动完成（逻辑
 
 检查点（MVSS-Delta）：
 
-- `mode=delta`，且无 `abort`。
+- S0：`send,delta` → `ack_recv,delta`（或 `ack,delta` 事件）；
+- S1：`recv,delta` → `apply,delta` → `ack_send,delta`；
+- 全程 `mode=delta`，且无 `abort,delta`。
 
 ---
 

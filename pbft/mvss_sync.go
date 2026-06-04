@@ -101,7 +101,7 @@ func (p *Pbft) mvssBuildMigCtx(addr string, toShard int, mig1Time int64) *core.T
 // mvssProbeEarlyPauseSuffixOld 在 NewMap（mvssBuildMigCtx）后立刻暂停 suffix-old（tx3）。
 // 用逻辑 ClientTS=200 的 tx2 槽位触发 DetectInterleave，不发送交易；真实 tx2 仍由 Phase B 注入并重定向。
 func mvssProbeEarlyPauseSuffixOld(addr string, mig1Time int64, ctx *account.MigAccountCtx) {
-	if ctx == nil || !params.IsMVSS() || params.IsMVSSDelta() {
+	if ctx == nil || !params.IsMVSS() {
 		return
 	}
 	has1, has3 := false, false
@@ -143,7 +143,7 @@ func mvssTriggerProbeSyncAfterMig1(p *Pbft, addr string, mig1Time int64, ctx *ac
 
 // mvssShouldKeepTxOnSourceDuringAnnounce Announce 收池时保留 Stage3 尚未完成的 suffix-old / Paused 交易在源片。
 func mvssShouldKeepTxOnSourceDuringAnnounce(addr string, tx *core.Transaction) bool {
-	if tx == nil || !params.IsMVSS() || params.IsMVSSDelta() {
+	if tx == nil || !params.IsMVSS() {
 		return false
 	}
 	ctx, ok := account.GetMigCtx(addr)
@@ -159,7 +159,7 @@ func mvssShouldKeepTxOnSourceDuringAnnounce(addr string, tx *core.Transaction) b
 
 // mvssNormalizeTargetNewTx 目标片收到迁户 new 后按本地交易执行（清除误设的 IsRelay）。
 func mvssNormalizeTargetNewTx(tx *core.Transaction, selfShardID int) {
-	if tx == nil || !params.IsMVSS() || params.IsMVSSDelta() {
+	if tx == nil || !params.IsMVSS() {
 		return
 	}
 	from := hex.EncodeToString(tx.Sender)
@@ -359,6 +359,21 @@ func (p *Pbft) mvssApplySyncInbound(s *core.TXsync) {
 	writeSyncLog("apply", "sync", s.Address, s.StartN, s.EndN, true, mvssSyncStateReason(ns), 0)
 }
 
+// mvssMaybePromoteAfterNewEnqueued 目标片 delta/sync apply 后晚到的 new 入池：对齐链上 nonce 并提至队首。
+func (p *Pbft) mvssMaybePromoteAfterNewEnqueued(addr string) {
+	if !params.IsMVSS() || addr == "" {
+		return
+	}
+	ctx, ok := account.GetMigCtx(addr)
+	if !ok || ctx == nil || ctx.TargetShard != params.ShardTable[params.Config.ShardID] {
+		return
+	}
+	if ctx.FSM < account.MigFSMSyncApplied {
+		return
+	}
+	p.mvssPromoteMigNewTxsToHead(addr)
+}
+
 // mvssPromoteMigNewTxsToHead apply State_ini 后将该账户的 new 交易移到队首，并按链上 nonce 重编号。
 func (p *Pbft) mvssPromoteMigNewTxsToHead(addr string) {
 	if p == nil || p.Node.CurChain == nil {
@@ -368,17 +383,9 @@ func (p *Pbft) mvssPromoteMigNewTxsToHead(addr string) {
 	if !ok || ctx == nil {
 		return
 	}
-	hexAddr, err := hex.DecodeString(addr)
-	if err != nil {
-		return
-	}
-	st, err := trie.New(trie.TrieID(common.BytesToHash(p.Node.CurChain.CurrentBlock.Header.StateRoot)), p.Node.CurChain.Triedb)
-	if err != nil {
-		return
-	}
 	nextNonce := ctx.LastCN
-	if enc := st.Get(hexAddr); enc != nil {
-		nextNonce = account.DecodeAccountState(enc).Nonce
+	if chainNonce, okN := p.Node.CurChain.GetAccountNonce(addr); okN {
+		nextNonce = chainNonce
 	}
 	pool := p.Node.CurChain.Tx_pool
 	pool.Lock.Lock()
@@ -538,8 +545,10 @@ func (p *Pbft) mvssSendSyncForAddr(addr string, ctx *account.MigAccountCtx, st *
 			Ack:          false,
 		}
 		delta.DeltaHash = delta.CalcDeltaHash()
-		ctx.LastDeltaHash = append([]byte(nil), delta.DeltaHash...)
+		// 源片：LastDeltaHash 在收到目标片 ack 后更新，避免重发时 PrevHash 与目标链不一致
+		account.MigCtxLock.Lock()
 		ctx.FSM = account.MigFSMSyncOut
+		account.MigCtxLock.Unlock()
 		p.TrySendTXsyncDelta([]*core.TXsyncDelta{delta}, ctx.TargetShard)
 		return
 	}
@@ -557,12 +566,21 @@ func (p *Pbft) mvssSendSyncForAddr(addr string, ctx *account.MigAccountCtx, st *
 	p.TrySendTXsync([]*core.TXsync{sync}, ctx.TargetShard)
 }
 
-// mvssOnBlockCommitted 块提交后：标记已提交、按论文序发 sync/ack。
+// mvssOnBlockCommitted 块提交后：标记已提交、按论文序发 sync/ack（全量或 Delta 分叉）。
 func (p *Pbft) mvssOnBlockCommitted(block *core.Block, st *trie.Trie) {
-	if !params.IsMVSS() || params.IsMVSSDelta() {
+	if !params.IsMVSS() {
 		return
 	}
 	selfShard := params.ShardTable[params.Config.ShardID]
+
+	// TXmig2 上链后 flush 早到的 delta（账户此时才写入状态树）
+	if params.IsMVSSDelta() {
+		for _, m2 := range block.TXmig2s {
+			if m2 != nil && m2.Address != "" {
+				p.mvssFlushPendingTargetDeltas(m2.Address)
+			}
+		}
+	}
 
 	for _, tx := range block.Transactions {
 		from := hex.EncodeToString(tx.Sender)
@@ -589,12 +607,16 @@ func (p *Pbft) mvssOnBlockCommitted(block *core.Block, st *trie.Trie) {
 			fmt.Printf("[MVSS+] 账户 %s 已中止，跳过块后同步: %s\n", addr, reason)
 			continue
 		}
-		// 目标片：new 上链后回传 Stateʲ
+		// 目标片：new 上链后回传 Stateʲ / Delta ack
 		if ctx.TargetShard == selfShard {
 			if ctx.FSM == account.MigFSMSyncApplied && ctx.PendingSyncAck {
 				fmt.Printf("[MVSS+] 目标片 %s 账户 %s 块 %d 触发 sync ack (new 已执行)\n",
 					params.Config.ShardID, addr, block.Header.Number)
-				p.mvssSendSyncAck(addr, ctx, st)
+				if params.IsMVSSDelta() {
+					p.mvssSendDeltaAck(addr, ctx, st, block)
+				} else {
+					p.mvssSendSyncAck(addr, ctx, st)
+				}
 			} else if ctx.FSM == account.MigFSMSyncApplied {
 				fmt.Printf("[MVSS+] 目标片 %s 账户 %s 块 %d SyncApplied 但尚无 new 上链，等待打包\n",
 					params.Config.ShardID, addr, block.Header.Number)
@@ -685,7 +707,7 @@ func mvssSyncStateReason(st *account.AccountState) string {
 
 // mvssOnAnnounceDone 迁移完成后清理上下文；Stage3 同步未完成时保留 MigCtx。
 func mvssOnAnnounceDone(addr string) {
-	if ctx, ok := account.GetMigCtx(addr); ok && ctx != nil && params.IsMVSS() && !params.IsMVSSDelta() {
+	if ctx, ok := account.GetMigCtx(addr); ok && ctx != nil && params.IsMVSS() {
 		switch ctx.FSM {
 		case account.MigFSMPauseOld, account.MigFSMSyncOut,
 			account.MigFSMWaitSyncIni, account.MigFSMSyncApplied:
