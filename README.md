@@ -21,7 +21,7 @@ start_2shard_2node.bat selectedTxs_300K.csv MVSS
 start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
 ```
 
-验证 MVSS sync 通路时，client 另加 `--enableSyncProbe`（或 `params/config.go` 中 `EnableSyncProbe=true`），跑完后查看 `log/S*_sync.csv` 与探针交易 Id `9000000001` 起，详见 `说明文档/Sync探针注入.md`；Delta 出站聚合见 `说明文档/聚合窗口.md`。
+验证 MVSS sync 通路时，client 另加 `--enableSyncProbe`（或 `params/config.go` 中 `EnableSyncProbe=true`），跑完后查看 `log/S*_sync.csv` 与探针交易 Id `9000000001` 起，详见 `说明文档/Sync探针注入.md`；Delta 出站窗口聚合见 `说明文档/聚合窗口.md`。
 
 脚本会依次启动 **S0-N0、S0-N1、S1-N0、S1-N1** 四个节点窗口，等待数秒后启动 **客户端**（监听 `127.0.0.1:8800`）。节点默认监听 `8010/8011/8020/8021`。
 
