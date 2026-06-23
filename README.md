@@ -2,7 +2,7 @@
 
 基于 **Go** 的分片区块链仿真器，实现 **MVSS（多版本状态同步）** 相关的跨分片交易、账户迁移与中继（relay）逻辑。适用于论文复现与性能实验，默认采用简化的单节点 PBFT 出块模型。
 
-![全流程](D:\Desktop\实验室\MVSS+\MVSS-main\说明文档\全流程.png)
+![全流程](说明文档/全流程.png)
 
 ## 环境要求
 
@@ -16,7 +16,7 @@
 
 ```bat
 start_2shard_2node.bat
-REM 或指定数据集与迁移策略（MVSS=现有逻辑，MVSS+=新方法接口）：
+REM 或指定数据集与迁移策略（SOTA-Lock / Fine-tuned-Lock / MVSS / MVSS-Delta）：
 start_2shard_2node.bat selectedTxs_300K.csv MVSS
 start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
 ```
@@ -58,8 +58,43 @@ go run main.go -S 2 -f 0 -c -t selectedTxs_300K.csv --maxInjectTxs 5000
 ## 配置与日志
 
 - 全局参数默认值见 `params/config.go`（出块间隔、块大小、注入速率、迁移策略等）。
-- 运行后在 `log/` 下生成各分片的块统计、交易明细、队列长度等 CSV。
-- 更详细的参数说明与代码对照见 `说明文档/`（如 `参数配置.md`、`账户迁移策略对比.md`）。
+- 运行后在 `log/` 下生成各分片的块统计、交易明细、队列长度、Stage3 同步日志（`S*_sync.csv`）等 CSV。
+- 参数含义、策略差异、实验设计与指标定义见下方 [说明文档](#说明文档) 一节。
+
+## 说明文档
+
+`说明文档/` 目录按 **6+1 核心文档 + 辅助材料** 组织，建议按用途选读。
+
+### 核心文档（6+1）
+
+| 文档 | 内容 |
+|------|------|
+| [参数配置.md](说明文档/参数配置.md) | 全局参数、`MigrationStrategy`（`-m`）、实验矩阵与启动示例 |
+| [账户迁移策略对比.md](说明文档/账户迁移策略对比.md) | SOTA-Lock / Fine-tuned-Lock / MVSS / MVSS-Delta 对比；MVSS 机制、双时间戳、Delta 代码入口 |
+| [账户迁移时序.md](说明文档/账户迁移时序.md) | TXmig1 → TXmig2 → Announce → CaP 工程流水线；§10 MVSS-Delta 调用链与时序图 |
+| [Sync探针注入.md](说明文档/Sync探针注入.md) | Stage3 探针配置、Phase A/B、验收方法；§12 为何需要探针及论文表述 |
+| [聚合窗口.md](说明文档/聚合窗口.md) | MVSS-Delta 源片 State_ini 出站 batch、`DeltaAggregateWindowMs` 行为 |
+| [实验指标定义.md](说明文档/实验指标定义.md) | Latency、RLT、TPS、RDT、DSR 等指标公式；与 `scripts/metrics_definitions.py` 一一对应 |
+| [期刊实验规划.md](说明文档/期刊实验规划.md) | Mary 六大期刊实验在本仓库的落地方式；主实验（关探针）与 Stage3 微基准（开探针）分工 |
+
+### 辅助材料
+
+| 文档 | 内容 |
+|------|------|
+| [MVSS+修改——Mary.txt](说明文档/MVSS+修改——Mary.txt) | 学长初版期刊实验方案（论文结构与六大实验原始设想） |
+| [debug.md](说明文档/debug.md) | 策略重命名、MVSS-Delta MVP、探针 Stage3 等变更摘要 |
+| [WORKSPACE_CODE_GUIDE.md](说明文档/WORKSPACE_CODE_GUIDE.md) | 工作区代码导读：目录职责与启动入口 |
+| [全流程.png](说明文档/全流程.png) | 系统全流程示意图 |
+| `block-emulator调用关系.pdf`、`配置.pdf` | 早期 BlockEmulator 参考材料（无 md 交叉引用） |
+
+### 建议阅读顺序
+
+```text
+入门：参数配置 → 账户迁移策略对比 → 账户迁移时序
+跑 Stage3：Sync探针注入 → 聚合窗口 → 实验指标定义
+写论文实验：期刊实验规划 ← MVSS+修改——Mary.txt
+查代码：WORKSPACE_CODE_GUIDE + 账户迁移策略对比 §6
+```
 
 ## 复现实验后一键产出图表与表格
 
@@ -147,7 +182,16 @@ run_5_segments.bat <strategy> <dataset> <runs> <window> <raw_root>
 ├── test/                   # 命令行解析与节点/客户端启动逻辑
 ├── log/                    # 实验输出（运行时生成，已 gitignore）
 ├── record/                 # 状态 trie 磁盘数据（运行时生成）
-└── 说明文档/               # 设计说明、参数、调试笔记
+└── 说明文档/               # 参数、策略、探针、指标与期刊实验规划（见上文「说明文档」）
+    ├── 参数配置.md
+    ├── 账户迁移策略对比.md
+    ├── 账户迁移时序.md
+    ├── Sync探针注入.md
+    ├── 聚合窗口.md
+    ├── 实验指标定义.md
+    ├── 期刊实验规划.md
+    ├── MVSS+修改——Mary.txt
+    └── debug.md
 ```
 
 ## 编译

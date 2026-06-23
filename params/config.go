@@ -50,12 +50,12 @@ type ChainConfig struct {
 	Not_Lock_immediately     bool
 	RelayLock                bool
 
-	// Sync 探针（仅 client + MVSS/MVSS-Delta；见 说明文档/Sync探针注入.md）
+	// Sync 探针（所有迁移策略均支持；MVSS 专有处理由内部 IsMVSS() 守卫）
 	EnableSyncProbe      bool   // 是否在 runMigrationFromPending 注入交错探针交易
 	SyncProbeMaxAccounts int    // 每轮迁移最多探针账户数，0 表示用默认 3
 	SyncProbeDelayMs        int    // 已废弃，保留兼容；请用 SyncProbePhaseBDelayMs
 	SyncProbeSettleMs       int    // Phase A 发送后、NewMap 前的等待（毫秒），0=800
-	SyncProbePhaseBDelayMs  int    // NewMap 后触发 Phase B（毫秒），0=3*Block_interval 秒
+	SyncProbePhaseBDelayMs  int    // NewMap 后触发 Phase B 的延迟（毫秒），0=2×Block_interval（需覆盖 TXmig1 出块 + TryTXmig1 协程处理时间，确保所有账户 TXmig2 到达 S1 并建立 MigCtx）
 	SyncProbeAccount        string // 非空则仅对该迁出地址探针（须在迁出列表中）
 
 	// DeltaAggregateWindowMs 源片 State_ini delta 出站聚合窗口（毫秒）；见 说明文档/聚合窗口.md。
@@ -444,7 +444,7 @@ var (
 		OnlyOnce:                 100,
 		Not_Lock_immediately:     true,
 		RelayLock:                false,
-		EnableSyncProbe:          false,
+		EnableSyncProbe:          true,
 		SyncProbeMaxAccounts:     3,
 		SyncProbeDelayMs:         0,
 		SyncProbeSettleMs:        0,

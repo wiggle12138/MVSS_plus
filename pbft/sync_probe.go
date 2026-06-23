@@ -38,11 +38,10 @@ type syncProbeTarget struct {
 	dstShard string // 目标片，如 S1；PhaseB 应在该分片发出 Announce 后触发
 }
 
+// syncProbeEnabled 对所有迁移策略生效；MVSS 专有逻辑（logical tx2 / early pause）
+// 由各调用方自行用 params.IsMVSS() 守卫，此处不再限制策略类型。
 func syncProbeEnabled() bool {
-	if params.Config == nil || !params.Config.EnableSyncProbe {
-		return false
-	}
-	return params.IsMVSS() || params.IsMVSSDelta()
+	return params.Config != nil && params.Config.EnableSyncProbe
 }
 
 func syncProbeMaxAccounts() int {
@@ -72,14 +71,26 @@ func syncProbeSettle() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// syncProbePhaseBDelay NewMap 后等待 TXmig1 上链再发 Phase B（真实 new tx）。
+// syncProbePhaseBDelay NewMap 后等待 Phase B（注入真实 new tx2）的延迟。
+//
+// 约束：tx2 到达 S1 时，S1 所有迁出账户的 TXmig2 消息必须已到达并完成处理
+// （handleTXmig2Msg 为目标片创建 MigCtx，FSM=WaitSyncIni）。若 tx2 早于
+// MigCtx 到达，tx2 会被无阻拦地过早打包，PendingSyncAck 永远不被设置，
+// Stage3 同步将卡死于 "SyncApplied 但尚无 new 上链"。
+//
+// TXmig2 到达 S1 的时机：
+//   1. TXmig1 出块：约 1 × Block_interval
+//   2. TryTXmig1（go 协程）读取状态、生成 Merkle 证明、TCP 发送：随账户数增加
+//      耗时可达 100~600ms（4 个账户时实测约 500ms）
+// 因此安全默认值取 2 × Block_interval，为 TryTXmig1 协程提供充足余量。
+// 用户可通过 SyncProbePhaseBDelayMs 覆盖（建议 ≥ 1.5 × Block_interval）。
 func syncProbePhaseBDelay() time.Duration {
 	ms := params.Config.SyncProbePhaseBDelayMs
 	if ms <= 0 {
-		ms = params.Config.Block_interval * 3 * 1000
+		ms = params.Config.Block_interval * 2 * 1000 // 2 个出块周期，覆盖 TryTXmig1 异步延迟
 	}
-	if ms < 2000 {
-		ms = 2000
+	if ms < 500 {
+		ms = 500 // 绝对下限
 	}
 	return time.Duration(ms) * time.Millisecond
 }
