@@ -10,11 +10,78 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/trie"
 )
+
+var (
+	mvssPendingSyncInboundMu sync.Mutex
+	// 目标片在 MigCtx 建立前先到达的 TXsync（按地址暂存一条）
+	mvssPendingSyncInbound = make(map[string]*core.TXsync)
+)
+
+func mvssCachePendingSyncInbound(s *core.TXsync) {
+	if s == nil || s.Address == "" {
+		return
+	}
+	mvssPendingSyncInboundMu.Lock()
+	mvssPendingSyncInbound[s.Address] = s
+	mvssPendingSyncInboundMu.Unlock()
+	fmt.Printf("[MVSS+] 目标片 %s 暂存早到 TXsync addr=%s（等待 TXmig2 建立 MigCtx）\n",
+		params.Config.ShardID, s.Address)
+}
+
+func mvssTakePendingSyncInbound(addr string) (*core.TXsync, bool) {
+	if addr == "" {
+		return nil, false
+	}
+	mvssPendingSyncInboundMu.Lock()
+	defer mvssPendingSyncInboundMu.Unlock()
+	s, ok := mvssPendingSyncInbound[addr]
+	if ok {
+		delete(mvssPendingSyncInbound, addr)
+	}
+	return s, ok
+}
+
+// decodeAccountStateSafe 包装 DecodeAccountState，避免单账户异常字节直接 panic 整个节点。
+func decodeAccountStateSafe(raw []byte) (st *account.AccountState, ok bool) {
+	defer func() {
+		if recover() != nil {
+			st = nil
+			ok = false
+		}
+	}()
+	st = account.DecodeAccountState(raw)
+	return st, st != nil
+}
+
+// mvssTryApplyPendingSyncInbound 在 handleMig2 建立 MigCtx 后尝试应用早到的 TXsync。
+func (p *Pbft) mvssTryApplyPendingSyncInbound(addr string) {
+	if !params.IsMVSS() || params.IsMVSSDelta() || p == nil || addr == "" {
+		return
+	}
+	s, ok := mvssTakePendingSyncInbound(addr)
+	if !ok || s == nil {
+		return
+	}
+	selfShard := params.ShardTable[params.Config.ShardID]
+	ctx, hasCtx := account.GetMigCtx(addr)
+	if !hasCtx || ctx == nil || ctx.TargetShard != selfShard {
+		// 上下文还没准备好，放回等待下一次触发。
+		mvssCachePendingSyncInbound(s)
+		return
+	}
+	// 与 propose1/commit1 串行：避免并发写 Triedb。
+	p.sequenceLock.Lock()
+	defer p.sequenceLock.Unlock()
+	p.mvssApplySyncInbound(s)
+	fmt.Printf("[MVSS+] 目标片 %s 应用暂存 TXsync addr=%s（MigCtx 已就绪）\n",
+		params.Config.ShardID, addr)
+}
 
 // mvssBuildMigCtx 在收到新映射时为迁出账户建立 MVSS+ 上下文与 TXmig1 元数据。
 func (p *Pbft) mvssBuildMigCtx(addr string, toShard int, mig1Time int64) *core.TXmig1 {
@@ -232,10 +299,15 @@ func (p *Pbft) mvssRedirectNewTx(tx *core.Transaction) bool {
 
 // mvssValidateIncomingTx 校验迁移期交易：目标片要求带 RedirectTag；源片待发重定向的新 tx 可无标签。
 func mvssValidateIncomingTx(tx *core.Transaction) bool {
+	// 主实验（Exp1）关闭探针时，Stage3/Redirect 语义不参与验证，放行以避免误拦截正常 relay。
+	// Exp2/Exp6 开探针时仍执行严格校验。
+	if params.Config == nil || !params.Config.EnableSyncProbe {
+		return true
+	}
 	from := hex.EncodeToString(tx.Sender)
 	to := hex.EncodeToString(tx.Recipient)
 
-	// 源片：迁出账户发起、尚未打标的新交易（将由 mvssRedirectNewTx 打标并转发）
+	// 发送方是迁移账户：严格要求 RedirectTag + nonce（防重放/双花核心约束）。
 	if ctx, ok := account.GetMigCtx(from); ok && account.IsTXNew(ctx.Mig1Time, tx.RequestTime) {
 		if len(tx.RedirectTag) == 0 {
 			return true
@@ -249,25 +321,24 @@ func mvssValidateIncomingTx(tx *core.Transaction) bool {
 		return true
 	}
 
-	// 目标片：迁入账户作为收款方收到重定向交易，必须带有效标签
-	ctx, ok := account.GetMigCtx(to)
-	if !ok {
-		ctx, ok = account.GetMigCtx(from)
-	}
-	if !ok {
-		return true
-	}
-	if len(tx.RedirectTag) == 0 {
-		return false
-	}
-	if !core.ValidRedirectTag(tx.RedirectTag, to, ctx.Mig1Time, ctx.MigNonce) {
-		if !core.ValidRedirectTag(tx.RedirectTag, from, ctx.Mig1Time, ctx.MigNonce) {
-			return false
+	// 接收方是迁移账户：允许普通 relay/cross-shard 入账（可无 RedirectTag）。
+	// RedirectTag 主要保护“迁移账户作为发送方”的新交易；否则会误丢普通入账交易。
+	if ctx, ok := account.GetMigCtx(to); ok {
+		if len(tx.RedirectTag) == 0 {
+			return true
 		}
-	}
-	if tx.Nonce <= ctx.LastCN {
+		if core.ValidRedirectTag(tx.RedirectTag, to, ctx.Mig1Time, ctx.MigNonce) {
+			return true
+		}
+		// 兼容历史路径：部分消息使用 sender 侧地址构造标签。
+		if core.ValidRedirectTag(tx.RedirectTag, from, ctx.Mig1Time, ctx.MigNonce) {
+			return true
+		}
 		return false
 	}
+
+	// 发送方存在 MigCtx 但非 new（典型为源片通过 CaP 迁来的 old/pending），允许无标签通过。
+	// 只有 new 发送方交易才需要 RedirectTag 强约束（见前面的分支）。
 	return true
 }
 
@@ -317,6 +388,7 @@ func (p *Pbft) handleTXsync(content []byte) {
 		return
 	}
 
+	selfShard := params.ShardTable[params.Config.ShardID]
 	for _, s := range msg.TXsyncs {
 		if s == nil {
 			continue
@@ -336,6 +408,10 @@ func (p *Pbft) handleTXsync(content []byte) {
 		}
 
 		// 迁入片：apply State_ini，待 new 上链后再块后回传 ack
+		if !hasCtx || ctx == nil || ctx.TargetShard != selfShard {
+			mvssCachePendingSyncInbound(s)
+			continue
+		}
 		p.mvssApplySyncInbound(s)
 	}
 }
@@ -511,7 +587,14 @@ func (p *Pbft) mvssSendSyncForAddr(addr string, ctx *account.MigAccountCtx, st *
 		fmt.Printf("[MVSS+] 账户 %s 即时同步跳过: 状态树无该账户\n", addr)
 		return
 	}
-	stateNew := account.DecodeAccountState(enc)
+	stateNew, okDecode := decodeAccountStateSafe(enc)
+	if !okDecode {
+		fmt.Printf("[MVSS+] 账户 %s 即时同步失败: 账户状态解码异常，跳过本轮 sync\n", addr)
+		if params.IsMVSSDelta() {
+			mvssAbortDelta(addr, "state decode failed on source")
+		}
+		return
+	}
 	stateOld := &account.AccountState{
 		Nonce:    ctx.LastCN,
 		Migrate:  ctx.TargetShard,
@@ -674,23 +757,16 @@ func (p *Pbft) mvssSendSyncAck(addr string, ctx *account.MigAccountCtx, st *trie
 	if ctx == nil || ctx.FSM != account.MigFSMSyncApplied {
 		return
 	}
-	hexAddr, err := hex.DecodeString(addr)
-	if err != nil {
-		return
-	}
-	enc := st.Get(hexAddr)
-	if enc == nil {
+	stateNew, ok := p.Node.CurChain.GetAccountState(addr)
+	if !ok || stateNew == nil {
 		fmt.Printf("[MVSS+] 目标片 sync ack 跳过: 账户 %s 不在状态树\n", addr)
 		return
 	}
-	stateNew := account.DecodeAccountState(enc)
-	mpNew := &core.ProofDB{}
-	_ = st.Prove(hexAddr, 0, mpNew)
 	sync := &core.TXsync{
 		Address:     addr,
 		FromShard:   params.Config.ShardID,
 		StateNew:    stateNew,
-		MPNew:       mpNew,
+		MPNew:       &core.ProofDB{},
 		StartN:      ctx.LastCN,
 		EndN:        stateNew.Nonce,
 		RequestTime: time.Now().UnixMilli(),

@@ -9,6 +9,13 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
+)
+
+const (
+	tcpDialTimeout  = 3 * time.Second
+	tcpWriteTimeout = 5 * time.Second
+	tcpDialRetries  = 3
 )
 
 var (
@@ -64,49 +71,70 @@ func Min(a, b int) int {
 
 // }
 
-// 使用tcp发送消息，利用长度前缀防止粘包
-func TcpDial(context []byte, addr string) {
-	// 给map加锁
+func evictTcpConn(addr string) {
 	connMaplock.Lock()
+	defer connMaplock.Unlock()
+	if conn, ok := connMap[addr]; ok {
+		delete(connMap, addr)
+		_ = conn.Close()
+	}
+}
+
+func getOrDialTcpConn(addr string) (net.Conn, error) {
+	connMaplock.Lock()
+	defer connMaplock.Unlock()
 	if connMap == nil {
 		connMap = make(map[string]net.Conn)
 	}
-	// 没有连接则先建立连接
-	if _, ok := connMap[addr]; !ok {
-		conn, err := net.Dial("tcp", addr)
-		if err != nil {
-			log.Println("connect error", err)
-			return
-		}
-		connMap[addr] = conn
+	if conn, ok := connMap[addr]; ok {
+		return conn, nil
 	}
+	conn, err := net.DialTimeout("tcp", addr, tcpDialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	connMap[addr] = conn
+	return conn, nil
+}
 
-	conn := connMap[addr]
-	// 给map解锁
-	connMaplock.Unlock()
-
-	// 计算消息长度
+// TcpDial 使用长度前缀发送消息；连接/写入带超时与轻量重试，避免节点未就绪时永久阻塞。
+func TcpDial(context []byte, addr string) {
 	messageLength := uint32(len(context))
-
-	// 创建一个字节切片，用于存储消息长度前缀和消息内容
 	data := make([]byte, 4+len(context))
-
-	// 将消息长度写入字节切片（使用大端序）
 	binary.BigEndian.PutUint32(data[:4], messageLength)
-
-	// 将消息内容写入字节切片
 	copy(data[4:], context)
 
-	// 发送消息
-	_, err := conn.Write(data)
-	if err != nil {
-		log.Printf("TcpDial write to %s failed: %v", addr, err)
-		connMaplock.Lock()
-		delete(connMap, addr)
-		connMaplock.Unlock()
-		_ = conn.Close()
+	var lastErr error
+	for attempt := 0; attempt < tcpDialRetries; attempt++ {
+		conn, err := getOrDialTcpConn(addr)
+		if err != nil {
+			lastErr = err
+			evictTcpConn(addr)
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(tcpWriteTimeout))
+		if _, err = conn.Write(data); err != nil {
+			lastErr = err
+			evictTcpConn(addr)
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
+		}
+		return
 	}
+	if lastErr != nil {
+		log.Printf("TcpDial failed addr=%s after %d retries: %v", addr, tcpDialRetries, lastErr)
+	}
+}
 
+// CloseTcpConnections 关闭并清空客户端侧持久 TCP 连接池（进程内复用场景）。
+func CloseTcpConnections() {
+	connMaplock.Lock()
+	defer connMaplock.Unlock()
+	for addr, conn := range connMap {
+		_ = conn.Close()
+		delete(connMap, addr)
+	}
 }
 
 // 使用tcp（短链接）发送消息

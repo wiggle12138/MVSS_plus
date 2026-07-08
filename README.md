@@ -21,7 +21,9 @@ start_2shard_2node.bat selectedTxs_300K.csv MVSS
 start_2shard_2node.bat selectedTxs_300K.csv MVSS-Delta
 ```
 
-验证 MVSS sync 通路时，client 另加 `--enableSyncProbe`（或 `params/config.go` 中 `EnableSyncProbe=true`），跑完后查看 `log/S*_sync.csv` 与探针交易 Id `9000000001` 起，详见 `说明文档/Sync探针注入.md`；Delta 出站窗口聚合见 `说明文档/聚合窗口.md`。
+验证 MVSS sync 通路时，client 另加 `--enableSyncProbe`（或 `params/config.go` 中 `EnableSyncProbe=true`）。  
+探针常用参数：`--syncProbePhaseBDelayMs`（NewMap 后到 PhaseB 的延迟）与 `--syncProbeSettleMs`（PhaseA 后等待入池）。  
+跑完后查看 `log/S*_sync.csv` 与探针交易 Id `9000000001` 起，详见 `说明文档/Sync探针注入.md`；Delta 出站窗口聚合见 `说明文档/聚合窗口.md`。
 
 脚本会依次启动 **S0-N0、S0-N1、S1-N0、S1-N1** 四个节点窗口，等待数秒后启动 **客户端**（监听 `127.0.0.1:8800`）。节点默认监听 `8010/8011/8020/8021`。
 
@@ -96,72 +98,59 @@ go run main.go -S 2 -f 0 -c -t selectedTxs_300K.csv --maxInjectTxs 5000
 查代码：WORKSPACE_CODE_GUIDE + 账户迁移策略对比 §6
 ```
 
-## 复现实验后一键产出图表与表格
+## 期刊实验（Exp1–Exp6）
 
-当多次实验跑完后，建议先将每次运行的 `log/*.csv` 按策略和轮次整理成如下目录：
+根目录入口脚本，产物落在 `results/exp{1,2,4,6}_*/`。详见 `说明文档/实验文档/`。
 
-```text
-results/raw/
-├── SOTA-Lock/
-│   ├── run1/*.csv
-│   ├── run2/*.csv
-│   └── ...
-└── Fine-Tune-Lock/
-    ├── run1/*.csv
-    ├── run2/*.csv
-    └── ...
-```
+| 脚本 | 实验 | 说明 |
+|------|------|------|
+| `run_exp1.bat` | Exp1 可扩展性 | 关探针；分片 × 注入速率 × 四策略 |
+| `run_exp2.bat` | Exp2 高并发迁移 | 开探针；MVSS vs MVSS-Delta |
+| `run_exp6.bat` | Exp6 窗口敏感性 | MVSS-Delta 增量聚合窗口扫参 |
+| `run_exp4.bat` | Exp4 以太坊负载 | 关探针；`BlockTransaction.csv` 四策略 |
 
-然后在项目根目录执行：
+**Exp4 示例**：
 
 ```bat
-run_multi_analysis.bat
+set ALLOW_LONG_RUN=1
+run_exp4.bat
 ```
 
-该脚本会自动串行执行：
-
-1. `scripts/summarize_multi_runs.py`：汇总多次运行指标并输出表格；  
-2. `scripts/plot_multi_runs.py`：根据汇总结果生成对比图像。
-
-默认输入目录：`results/raw`  
-默认输出目录：`results/multi_run_summary`
-
-可自定义路径：
+**Exp1 示例**（冒烟）：
 
 ```bat
-run_multi_analysis.bat "你的root目录" "你的输出目录"
+run_exp1.bat selectedTxs_300K.csv SOTA-Lock 4 4 1 24000 dryrun
 ```
 
-输出产物包括：
-
-- `run_metrics.csv`
-- `strategy_summary.csv`
-- `strategy_summary.md`
-- `figures/*.png`
-- `figures/figures_manifest.md`
-
-## 自动跑 5 轮并归档日志
-
-如果希望按区间注入（每轮 2 万笔）并自动把 `log/*.csv` 归档到 `results/raw/<strategy>/runN/`，可在根目录执行：
+**Exp2 示例**（默认 4×4、probe=50）：
 
 ```bat
-run_5_segments.bat SOTA-Lock selectedTxs_300K.csv
-run_5_segments.bat Fine-tuned-Lock selectedTxs_300K.csv
+run_exp2.bat
 ```
 
-默认执行 `run1~run5`，区间分别为：
-
-- run1: `[0, 20000)`
-- run2: `[20000, 40000)`
-- run3: `[40000, 60000)`
-- run4: `[60000, 80000)`
-- run5: `[80000, 100000)`
-
-可自定义参数：
+**Exp6 示例**（2×2 参考规模，默认）：
 
 ```bat
-run_5_segments.bat <strategy> <dataset> <runs> <window> <raw_root>
+run_exp6.bat
 ```
+
+**Exp6 4×4 主结论数据**：
+
+```bat
+set OUT_ROOT=results/exp6_scale_4x4_full/raw
+run_exp6.bat selectedTxs_300K.csv MVSS-Delta "4" 4 "0,50,100,200,500" 3
+```
+
+汇总与出图（不跑仿真）：
+
+```bat
+python scripts/summarize_exp1_grid.py --latest-per-combo
+python scripts/summarize_exp2_metrics.py
+python scripts/recalc_exp6_metrics.py
+python scripts/summarize_exp4_metrics.py
+```
+
+脚本索引见 [scripts/README.md](scripts/README.md)。
 
 ## 目录结构
 

@@ -25,11 +25,14 @@ var (
 	isClient       bool
 	maxInjectTxs       int // 0 = unlimited; client only: cap loaded/injected txs for smoke tests
 	injectStartTx      int // 0-based offset; client only
+	injectSpeed        int // 0 = keep config default; client only
 	migrationStrategy   string
 	enableSyncProbe     bool
 	syncProbeMaxAccounts int
-	syncProbeDelayMs    int
+	syncProbePhaseBDelayMs int
+	syncProbeSettleMs   int
 	syncProbeAccount    string
+	deltaAggregateWindowMs int
 	// requestlog    *csv.Writer
 	EndTime int64
 )
@@ -48,6 +51,15 @@ func is300KStyleDatasetPath(path string) bool {
 	return false
 }
 
+func isBlockTransactionDatasetPath(path string) bool {
+	base := filepath.Base(path)
+	switch base {
+	case "0to999999_BlockTransaction.csv", "300W.csv", "100W.csv", "50W.csv", "20W.csv", "200W.csv":
+		return true
+	}
+	return strings.Contains(base, "_BlockTransaction") && strings.HasSuffix(base, ".csv")
+}
+
 func Test_shard() {
 	flag.IntVarP(&shard_num, "shard_num", "S", 1, "indicate that how many shards are deployed")
 	flag.StringVarP(&shardID, "shardID", "s", "", "id of the shard to which this node belongs, for example, S0")
@@ -57,11 +69,14 @@ func Test_shard() {
 	flag.BoolVarP(&isClient, "client", "c", false, "whether this node is a client")
 	flag.IntVar(&maxInjectTxs, "maxInjectTxs", 0, "client only: inject at most this many txs (0=all). For quick block tests.")
 	flag.IntVar(&injectStartTx, "injectStartTx", 0, "client only: start injecting from this 0-based tx offset.")
+	flag.IntVar(&injectSpeed, "injectSpeed", 0, "client only: override Inject_speed (tx/s). 0 means keep config default.")
 	flag.StringVarP(&migrationStrategy, "migrationStrategy", "m", "", "migration: original|MVSS|MVSS-Delta|SOTA-Lock|Fine-tuned-Lock|stop_epoch (aliases: lock, finetuned, MVSS+; empty=config default)")
 	flag.BoolVar(&enableSyncProbe, "enableSyncProbe", false, "client only: inject MVSS sync probe txs on migration (MVSS/MVSS-Delta)")
 	flag.IntVar(&syncProbeMaxAccounts, "syncProbeMaxAccounts", 0, "client only: max outgoing accounts per migration probe round (0=config default 3)")
-	flag.IntVar(&syncProbeDelayMs, "syncProbeDelayMs", 0, "client only: PhaseB delay ms after NewMap (0=config: 2*Block_interval)")
+	flag.IntVar(&syncProbePhaseBDelayMs, "syncProbePhaseBDelayMs", 0, "client only: PhaseB delay ms after NewMap (0=config: 2*Block_interval)")
+	flag.IntVar(&syncProbeSettleMs, "syncProbeSettleMs", 0, "client only: PhaseA settle ms before NewMap (0=config: 800ms)")
 	flag.StringVar(&syncProbeAccount, "syncProbeAccount", "", "client only: force probe on this hex addr if it migrates out")
+	flag.IntVar(&deltaAggregateWindowMs, "deltaAggregateWindowMs", -1, "override DeltaAggregateWindowMs; -1 means keep config default")
 
 	flag.Parse() //解析命令行参数
 
@@ -90,22 +105,33 @@ func Test_shard() {
 		if injectStartTx > 0 {
 			config.InjectStartTx = injectStartTx
 		}
-		if enableSyncProbe {
-			config.EnableSyncProbe = true
+		if injectSpeed > 0 {
+			config.Inject_speed = injectSpeed
 		}
+		// CLI 默认 false；须显式赋值，否则沿用 config 默认 true 会误开探针（Exp1 主实验须关探针）。
+		config.EnableSyncProbe = enableSyncProbe
 		if syncProbeMaxAccounts > 0 {
 			config.SyncProbeMaxAccounts = syncProbeMaxAccounts
 		}
-		if syncProbeDelayMs > 0 {
-			config.SyncProbeDelayMs = syncProbeDelayMs
+		if syncProbePhaseBDelayMs > 0 {
+			config.SyncProbePhaseBDelayMs = syncProbePhaseBDelayMs
+		}
+		if syncProbeSettleMs > 0 {
+			config.SyncProbeSettleMs = syncProbeSettleMs
 		}
 		if syncProbeAccount != "" {
 			config.SyncProbeAccount = syncProbeAccount
 		}
+		if deltaAggregateWindowMs >= 0 {
+			config.DeltaAggregateWindowMs = deltaAggregateWindowMs
+		}
 		applyMigrationConfig(config)
 		if config.EnableSyncProbe {
-			fmt.Printf("SyncProbe enabled maxAccounts=%d delayMs=%d account=%q (MVSS=%v)\n",
-				config.SyncProbeMaxAccounts, config.SyncProbeDelayMs, config.SyncProbeAccount, params.IsMVSS())
+			fmt.Printf("SyncProbe enabled maxAccounts=%d phaseBDelayMs=%d settleMs=%d account=%q (MVSS=%v)\n",
+				config.SyncProbeMaxAccounts, config.SyncProbePhaseBDelayMs, config.SyncProbeSettleMs, config.SyncProbeAccount, params.IsMVSS())
+		}
+		if deltaAggregateWindowMs >= 0 {
+			fmt.Printf("DeltaAggregateWindowMs=%d\n", config.DeltaAggregateWindowMs)
 		}
 		pbft.RunClient(testFile)
 		return
@@ -126,7 +152,13 @@ func Test_shard() {
 	config.Malicious_num = int(malicious_num)
 	config.Shard_num = int(shard_num)
 	config.Path = testFile
+	if deltaAggregateWindowMs >= 0 {
+		config.DeltaAggregateWindowMs = deltaAggregateWindowMs
+	}
 	applyMigrationConfig(config)
+	if deltaAggregateWindowMs >= 0 {
+		fmt.Printf("DeltaAggregateWindowMs=%d\n", config.DeltaAggregateWindowMs)
+	}
 	// for i := 0; i < 184379; i++ {
 	// 	params.Init_addrs = append(params.Init_addrs, utils.Int2hexString(i))
 	// }
@@ -156,7 +188,7 @@ func Test_shard() {
 			break
 		}
 		var senderstr, recipientstr string
-		if config.Path == "0to999999_BlockTransaction.csv" || config.Path == "300W.csv" || config.Path == "100W.csv" || config.Path == "20W.csv" || config.Path == "50W.csv" || config.Path == "200W.csv" {
+		if isBlockTransactionDatasetPath(config.Path) {
 			// 特殊数据集格式：地址在第 4/5 列（索引 3/4）
 			if len(row) < 8 {
 				continue

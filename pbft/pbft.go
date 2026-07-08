@@ -1248,6 +1248,14 @@ func (p *Pbft) handleRelay(content []byte) {
 	txcss := make([]*core.Transaction, 0) //用于存储本分片内的交易
 	for _, tx := range relay.Txs {
 		txcs := tx.Txcs
+		// MVSS：relay 入站也补齐迁移分界时刻，统一 old/new 判定口径。
+		if params.IsMVSSPlus() && txcs != nil && txcs.TXmig1_Time <= 0 {
+			if ctx, ok := account.GetMigCtx(hex.EncodeToString(txcs.Sender)); ok && ctx != nil && ctx.Mig1Time > 0 {
+				txcs.TXmig1_Time = ctx.Mig1Time
+			} else if ctx, ok := account.GetMigCtx(hex.EncodeToString(txcs.Recipient)); ok && ctx != nil && ctx.Mig1Time > 0 {
+				txcs.TXmig1_Time = ctx.Mig1Time
+			}
+		}
 		if params.IsMVSSPlus() && !mvssValidateIncomingTx(txcs) {
 			continue
 		}
@@ -1391,7 +1399,9 @@ func (p *Pbft) handleMig2(content []byte) {
 			}
 			m1 := m2.Txmig1
 			fsm := account.MigFSMActive
-			if m1.Sync && params.IsMVSS() {
+			// TXini.Sync 仅表示源片存在 pending TX_old；无交错时目标片应继续执行 new tx。
+			// 仅在开启探针（Exp2/Exp6，强制交错）时，目标片初始进入 WaitSyncIni。
+			if m1.Sync && params.IsMVSS() && params.Config.EnableSyncProbe {
 				fsm = account.MigFSMWaitSyncIni
 			}
 			account.SetMigCtx(m1.Address, &account.MigAccountCtx{
@@ -1409,6 +1419,8 @@ func (p *Pbft) handleMig2(content []byte) {
 				FSM:           fsm,
 				LastDeltaHash: nil,
 			})
+			// 处理 TXsync 先于 TXmig2 到达的竞争：MigCtx 建立后尝试应用暂存的 sync。
+			p.mvssTryApplyPendingSyncInbound(m1.Address)
 		}
 	}
 	// 	p.Node.CurChain.InAccout1_pool.AddIn1s(in1.Outs)

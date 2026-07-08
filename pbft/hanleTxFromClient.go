@@ -34,8 +34,17 @@ func (p *Pbft) handleTxFromClient(content []byte) {
 	pending := make([]localItem, 0, len(txsFromClient.Txs))
 	for _, tx := range txsFromClient.Txs {
 		senderStr := hex.EncodeToString(tx.Sender)
+		recipientStr := hex.EncodeToString(tx.Recipient)
+		// MVSS：补齐迁移分界时刻，避免后续 old/new 判定误用默认值。
+		if params.IsMVSSPlus() && tx.TXmig1_Time <= 0 {
+			if ctx, ok := account.GetMigCtx(senderStr); ok && ctx != nil && ctx.Mig1Time > 0 {
+				tx.TXmig1_Time = ctx.Mig1Time
+			} else if ctx, ok := account.GetMigCtx(recipientStr); ok && ctx != nil && ctx.Mig1Time > 0 {
+				tx.TXmig1_Time = ctx.Mig1Time
+			}
+		}
 		senderSID := account.Addr2Shard(senderStr)
-		recSID := account.Addr2Shard(hex.EncodeToString(tx.Recipient))
+		recSID := account.Addr2Shard(recipientStr)
 		probe := isSyncProbeTxID(tx.Id)
 		localTx := senderSID == self_shardID ||
 			(params.IsMVSSPlus() && recSID == self_shardID && len(tx.RedirectTag) > 0)

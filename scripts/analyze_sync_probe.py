@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 PROBE_BASE = 9_000_000_000
 PROBE_STRIDE = 10
+PROBE_MAX_OFFSET = 100_000  # 支持最多 10_000 组账户（每组占 10 个 id）
 PROBE_SLOT_NAMES = {1: "tx1_old", 2: "tx2_new", 3: "tx3_old"}
 PROBE_CLIENT_TS = {1: 100, 2: 200, 3: 300}
 EXPECTED_SHARD = {1: "S0", 2: "S1", 3: "S0"}
@@ -75,7 +76,7 @@ def decode_probe_txid(txid: int) -> Optional[Tuple[int, int, str]]:
     if txid < PROBE_BASE:
         return None
     offset = txid - PROBE_BASE
-    if offset <= 0 or offset >= 1000:
+    if offset <= 0 or offset >= PROBE_MAX_OFFSET:
         return None
     account_idx = offset // PROBE_STRIDE
     slot = offset % PROBE_STRIDE

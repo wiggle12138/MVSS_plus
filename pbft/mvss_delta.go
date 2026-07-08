@@ -328,6 +328,12 @@ func (p *Pbft) mvssApplyDeltaInbound(d *core.TXsyncDelta) bool {
 		enqueuePendingTargetDelta(d)
 		return true
 	}
+	if nonce < d.StartN {
+		// 目标片账户已存在但 nonce 仍落后（常见于 TXmig2 尚未把 LastCN 写入状态树），先暂存等待后续块提交后重试。
+		fmt.Printf("[MVSS-Delta] 账户 %s 暂缓 apply delta: StartN=%d 链上 nonce=%d\n", d.Address, d.StartN, nonce)
+		enqueuePendingTargetDelta(d)
+		return true
+	}
 	if nonce != d.StartN {
 		fmt.Printf("[MVSS-Delta] 账户 %s StartN=%d 与链上 nonce=%d 不一致\n", d.Address, d.StartN, nonce)
 		return false
@@ -358,18 +364,20 @@ func (p *Pbft) mvssSendDeltaAck(addr string, ctx *account.MigAccountCtx, st *tri
 	if ctx == nil || ctx.FSM != account.MigFSMSyncApplied {
 		return
 	}
-	hexAddr, err := hex.DecodeString(addr)
-	if err != nil {
-		return
-	}
-	enc := st.Get(hexAddr)
-	if enc == nil {
+	stateNew, ok := p.Node.CurChain.GetAccountState(addr)
+	if !ok || stateNew == nil {
 		fmt.Printf("[MVSS-Delta] 目标片 ack 跳过: 账户 %s 不在状态树\n", addr)
 		return
 	}
-	stateNew := account.DecodeAccountState(enc)
 	startN := ctx.LastCN
 	endN := stateNew.Nonce
+	if endN <= startN && block != nil && mvssBlockHasMigNewTx(block, addr, ctx) && endN > 0 {
+		// new 已在本块提交，但 LastCN 可能因时序提前推进；按“至少 1 笔 new”回传 ack，避免 Stage3 卡死。
+		corrected := endN - 1
+		fmt.Printf("[MVSS-Delta] 目标片 ack 校正: 账户 %s start=%d end=%d -> start=%d\n",
+			addr, startN, endN, corrected)
+		startN = corrected
+	}
 	if endN <= startN {
 		fmt.Printf("[MVSS-Delta] 目标片 ack 跳过: 账户 %s nonce 未推进 start=%d end=%d\n", addr, startN, endN)
 		return

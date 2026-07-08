@@ -52,17 +52,6 @@ func syncProbeMaxAccounts() int {
 	return n
 }
 
-func syncProbeDelay() time.Duration {
-	ms := params.Config.SyncProbeDelayMs
-	if ms <= 0 {
-		ms = params.Config.Block_interval * 2 * 1000
-	}
-	if ms < 500 {
-		ms = 500
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
 func syncProbeSettle() time.Duration {
 	ms := params.Config.SyncProbeSettleMs
 	if ms <= 0 {

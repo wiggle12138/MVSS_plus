@@ -9,6 +9,8 @@ import (
 const (
 	SyncProbeIDBase   = 9_000_000_000
 	SyncProbeIDStride = 10
+	// 预留足够大的探针 ID 区间：最多支持 10_000 组账户（每组 +1/+2/+3）。
+	SyncProbeIDMaxOffset = 100_000
 )
 
 // IsSyncProbeTxID 是否为 Sync 探针交易（Id 区间 9000000001 起）。
@@ -17,7 +19,7 @@ func IsSyncProbeTxID(id int) bool {
 		return false
 	}
 	offset := id - SyncProbeIDBase
-	return offset >= 0 && offset < 1000
+	return offset >= 0 && offset < SyncProbeIDMaxOffset
 }
 
 // RedirectTag 生成迁移期新交易重定向标签（仿真用确定性哈希）。

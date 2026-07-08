@@ -770,6 +770,32 @@ func (bc *BlockChain) GetAccountNonce(addr string) (uint64, bool) {
 	return account.DecodeAccountState(enc).Nonce, true
 }
 
+// GetAccountState 读取状态树中账户当前状态副本（用于块后同步/ack 读取最新链上值）。
+func (bc *BlockChain) GetAccountState(addr string) (*account.AccountState, bool) {
+	bc.stateMu.Lock()
+	defer bc.stateMu.Unlock()
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.Triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	hexAddr, err := hex.DecodeString(addr)
+	if err != nil {
+		return nil, false
+	}
+	enc := st.Get(hexAddr)
+	if enc == nil {
+		return nil, false
+	}
+	src := account.DecodeAccountState(enc)
+	dst := &account.AccountState{
+		Nonce:    src.Nonce,
+		Balance:  new(big.Int).Set(src.Balance),
+		Location: src.Location,
+		Migrate:  src.Migrate,
+	}
+	return dst, true
+}
+
 // ApplyMVSSAccountDelta 将增量 delta 写入本片状态树（Stage3 Delta 即时落盘）。
 func (bc *BlockChain) ApplyMVSSAccountDelta(addr string, deltaBalance *big.Int, deltaNonce int64) bool {
 	if deltaBalance == nil {
